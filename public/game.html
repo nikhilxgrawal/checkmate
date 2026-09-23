@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=10" />
+  <link rel="stylesheet" href="/style.css?v=11" />
 </head>
 <body>
   <header class="topbar">
@@ -25,6 +25,7 @@
     <div id="gameHeader" class="game-header"></div>
 
     <div id="verifyBar" class="verify-bar"></div>
+    <div id="walletBar" class="wallet-bar" style="display:none"></div>
     <div id="notifyBar" class="notify-bar"></div>
 
     <!-- Tabs -->
@@ -52,14 +53,11 @@
 
     <!-- Standings tab -->
     <div id="tab-standings" class="tab-panel" style="display:none">
-      <div style="text-align:center"><span class="section-title">🏆 Standings</span></div>
-      <p class="tab-note">Points: win = 1.0, draw = 0.5 each</p>
+      <div style="text-align:center"><span class="section-title">🏆 Top Bidders</span></div>
+      <p class="tab-note">Ranked by net winnings from settled bids in this game</p>
       <div id="winners" class="board"></div>
-      <div style="text-align:center"><span class="section-title">🎯 Top Predictors</span></div>
-      <p class="tab-note">Who predicted this game's winners correctly</p>
-      <div id="predictors" class="board"></div>
-      <div style="text-align:center"><span class="section-title">🔮 Most Predicted</span></div>
-      <p class="tab-note">Players ranked by predictions received in this game</p>
+      <div style="text-align:center"><span class="section-title">🔥 Most Backed</span></div>
+      <p class="tab-note">Players with the most points staked on them</p>
       <div id="predictions" class="board"></div>
     </div>
 
@@ -95,7 +93,7 @@
   <div class="footer">SnapGames · Acevector</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js?v=10"></script>
+  <script src="/app.js?v=11"></script>
   <script>initGame();</script>
 </body>
 </html>
