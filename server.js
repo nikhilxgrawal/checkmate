@@ -3,15 +3,24 @@ const express = require("express");
 const path = require("path");
 const crypto = require("crypto");
 const mysql = require("mysql2/promise");
+const XLSX = require("xlsx");
+const multer = require("multer");
 const auth = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || "acevector2026";
-const STARTING_BALANCE = Number(process.env.STARTING_BALANCE || 1000);
-const MAX_BID = Number(process.env.MAX_BID || 20);
+const STARTING_BALANCE = Number(process.env.STARTING_BALANCE || 10000);
+// MAX_BID = 0 (or unset) means no cap — a user may bid up to their balance.
+const MAX_BID = Number(process.env.MAX_BID || 0);
 
-app.use(express.json({ type: () => true, limit: "100kb" }));
+// Parse JSON for everything EXCEPT multipart/form-data (file uploads), which
+// multer handles per-route. type:() => true otherwise parses even when the
+// client sends a wrong/missing Content-Type.
+app.use(express.json({
+  type: (req) => !String(req.headers["content-type"] || "").includes("multipart/form-data"),
+  limit: "100kb",
+}));
 app.use(express.static(path.join(__dirname, "public")));
 
 // ---------- Data layer (MySQL) ----------
@@ -86,10 +95,11 @@ async function saveDB(db) {
     }
     for (const m of db.matches) {
       await conn.query(
-        `INSERT INTO matches (id, gameId, playerAId, playerBId, time, day, location, status, result, winnerId)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO matches (id, gameId, playerAId, playerBId, time, day, location, status, result, winnerId, startAt, endAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [m.id, m.gameId, m.playerAId, m.playerBId, m.time || "", m.day || "Today",
-         m.location || "", m.status || "upcoming", m.result || null, m.winnerId || null]
+         m.location || "", m.status || "upcoming", m.result || null, m.winnerId || null,
+         m.startAt != null ? m.startAt : null, m.endAt != null ? m.endAt : null]
       );
     }
     for (const b of db.bids) {
@@ -257,6 +267,24 @@ function nameFromEmail(email) {
     .join(" ") || email;
 }
 
+// Parse a start/end time into epoch ms. Accepts:
+//  - a number (epoch ms) or numeric string
+//  - "YYYY-MM-DD HH:MM" / "YYYY-MM-DDTHH:MM" (interpreted as local/IST time)
+//  - a JS Date (from an Excel date cell)
+// Returns null if empty/unparseable.
+function parseWhen(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === "number") return v > 1e12 ? v : Math.round(v); // assume ms
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\d{10,}$/.test(s)) return Number(s); // epoch ms as string
+  // Normalize "YYYY-MM-DD HH:MM[:SS]" to ISO local
+  const iso = s.replace(" ", "T");
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
 // ---- Wallet / bid helpers ----
 function getBalance(db, email) {
   if (db.wallets[email] === undefined) db.wallets[email] = STARTING_BALANCE;
@@ -418,12 +446,26 @@ app.post("/api/auth/request-otp", h(async (req, res) => {
   res.json({ ok: true, email: result.email });
 }));
 
-app.post("/api/auth/verify-otp", (req, res) => {
+app.post("/api/auth/verify-otp", h(async (req, res) => {
   const { email, code } = req.body || {};
   const result = auth.verifyOtp(email, code);
   if (!result.ok) return res.status(result.status).json({ error: result.error });
-  res.json({ ok: true, token: result.token, email: result.email, name: nameFromEmail(result.email) });
-});
+  // Auto opt-in to match notifications on successful login/verification.
+  let optedIn = false;
+  try {
+    const db = await loadDB();
+    const added = addOptIn(db, result.email);
+    getBalance(db, result.email); // ensure a wallet exists on first login
+    if (added || db.wallets[result.email] !== undefined) await saveDB(db);
+    optedIn = isOptedIn(db, result.email);
+  } catch (e) {
+    console.error("[verify-otp] opt-in error:", e.message);
+  }
+  res.json({
+    ok: true, token: result.token, email: result.email,
+    name: nameFromEmail(result.email), notifyOptedIn: optedIn,
+  });
+}));
 
 // ---- Bidding (pari-mutuel points) ----
 
@@ -447,8 +489,11 @@ app.post("/api/matches/:matchId/bid", h(async (req, res) => {
     return res.status(400).json({ error: "Choose Player A, Player B, or Draw." });
   }
   const amt = Math.floor(Number(stake));
-  if (!Number.isFinite(amt) || amt < 1 || amt > MAX_BID) {
-    return res.status(400).json({ error: `Bid must be a whole number from 1 to ${MAX_BID}.` });
+  if (!Number.isFinite(amt) || amt < 1) {
+    return res.status(400).json({ error: "Bid must be a whole number of at least ₹1." });
+  }
+  if (MAX_BID > 0 && amt > MAX_BID) {
+    return res.status(400).json({ error: `Bid cannot exceed ₹${MAX_BID}.` });
   }
   const db = await loadDB();
   const match = db.matches.find((m) => m.id === req.params.matchId);
@@ -466,7 +511,7 @@ app.post("/api/matches/:matchId/bid", h(async (req, res) => {
   }
   const balance = getBalance(db, email);
   if (amt > balance) {
-    return res.status(400).json({ error: `Not enough points. Your balance is ${balance}.` });
+    return res.status(400).json({ error: `Not enough balance. You have ₹${balance}.` });
   }
   db.wallets[email] = balance - amt;
   db.bids.push({
@@ -510,6 +555,36 @@ app.post("/api/notifications/set", h(async (req, res) => {
 }));
 
 // ---- Leaderboards ----
+
+// Match winners standings: players ranked by results. Win = 1.0, draw = 0.5 each.
+// Optional ?gameId=... scopes to one game.
+app.get("/api/leaderboard/winners", h(async (req, res) => {
+  const db = await loadDB();
+  const gameId = req.query.gameId;
+  const scoped = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
+  const stats = {}; // playerId -> { wins, draws, points }
+  const ensure = (pid) => (stats[pid] = stats[pid] || { wins: 0, draws: 0, points: 0 });
+  scoped.forEach((m) => {
+    const r = matchResult(m);
+    if (!r) return;
+    if (r === "draw") {
+      ensure(m.playerAId).draws += 1; ensure(m.playerAId).points += 0.5;
+      ensure(m.playerBId).draws += 1; ensure(m.playerBId).points += 0.5;
+    } else {
+      ensure(r).wins += 1; ensure(r).points += 1;
+    }
+  });
+  const board = db.players
+    .map((p) => ({
+      ...p,
+      wins: stats[p.id] ? stats[p.id].wins : 0,
+      draws: stats[p.id] ? stats[p.id].draws : 0,
+      points: stats[p.id] ? stats[p.id].points : 0,
+    }))
+    .filter((p) => p.points > 0)
+    .sort((a, b) => b.points - a.points || b.wins - a.wins);
+  res.json(board);
+}));
 
 // Most-backed players: total points staked on each player. Optional ?gameId=...
 app.get("/api/leaderboard/backed", h(async (req, res) => {
@@ -781,7 +856,7 @@ app.delete("/api/admin/players/:playerId", requireAdmin, h(async (req, res) => {
 }));
 
 app.post("/api/admin/matches", requireAdmin, h(async (req, res) => {
-  const { gameId, playerAId, playerBId, time, day, location } = req.body || {};
+  const { gameId, playerAId, playerBId, time, day, location, startAt, endAt } = req.body || {};
   if (!gameId) return res.status(400).json({ error: "A game is required." });
   if (!playerAId || !playerBId) return res.status(400).json({ error: "Both players are required." });
   if (playerAId === playerBId) return res.status(400).json({ error: "A match needs two different players." });
@@ -793,11 +868,126 @@ app.post("/api/admin/matches", requireAdmin, h(async (req, res) => {
     id: id(), gameId, playerAId, playerBId,
     time: (time || "").trim(), day: (day || "Today").trim(), location: (location || "").trim(),
     status: "upcoming", result: null, winnerId: null,
+    startAt: parseWhen(startAt), endAt: parseWhen(endAt),
   };
   db.matches.push(match);
   await saveDB(db);
   broadcast("matches", { id: match.id, gameId });
   res.status(201).json(match);
+}));
+
+// ---- Admin: bulk match upload (XLSX) ----
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+// Download a template .xlsx with the expected headers.
+app.get("/api/admin/matches/template", (req, res) => {
+  const headers = ["game", "playerA", "playerA_org", "playerB", "playerB_org", "time", "day", "location", "startAt"];
+  const sample = [{
+    game: "Chess", playerA: "Sandeep Singh Sachdeva", playerA_org: "Snapdeal",
+    playerB: "Rishi Sharma", playerB_org: "Unicommerce",
+    time: "1:30 PM - 2:00 PM", day: "Today", location: "Sky Deck - Tower A",
+    startAt: "2026-09-24 13:30",
+  }];
+  const ws = XLSX.utils.json_to_sheet(sample, { header: headers });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Matches");
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+  res.setHeader("Content-Disposition", 'attachment; filename="snapgames-matches-template.xlsx"');
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.send(buf);
+});
+
+// Upload matches in bulk. Best-effort: valid rows imported, bad rows skipped
+// with a per-row error report. Games/players auto-created by name.
+app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "No file uploaded. Attach an .xlsx file as 'file'." });
+  let rows;
+  try {
+    const wb = XLSX.read(req.file.buffer, { type: "buffer", cellDates: true });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json(ws, { defval: "" });
+  } catch (e) {
+    return res.status(400).json({ error: "Could not read the spreadsheet. Is it a valid .xlsx?" });
+  }
+  if (!rows.length) return res.status(400).json({ error: "The sheet has no data rows." });
+
+  const db = await loadDB();
+
+  // Case-insensitive lookup maps for auto-create-by-name.
+  const gameByName = {};
+  db.games.forEach((g) => (gameByName[g.name.trim().toLowerCase()] = g));
+  const playerByName = {};
+  db.players.forEach((p) => (playerByName[p.name.trim().toLowerCase()] = p));
+
+  function ensureGame(name) {
+    const key = name.trim().toLowerCase();
+    if (gameByName[key]) return gameByName[key];
+    const g = { id: id(), name: name.trim(), emoji: "🎮", description: "", ts: Date.now() };
+    db.games.push(g);
+    gameByName[key] = g;
+    return g;
+  }
+  function ensurePlayer(name, org) {
+    const key = name.trim().toLowerCase();
+    if (playerByName[key]) {
+      if (org && !playerByName[key].org) playerByName[key].org = org.trim();
+      return playerByName[key];
+    }
+    const p = { id: id(), name: name.trim(), org: (org || "").trim() };
+    db.players.push(p);
+    playerByName[key] = p;
+    return p;
+  }
+
+  const report = [];
+  let created = 0, gamesCreated = 0, playersCreated = 0;
+  const gamesBefore = db.games.length, playersBefore = db.players.length;
+
+  rows.forEach((row, i) => {
+    const rowNum = i + 2; // + header row, 1-indexed
+    const game = String(row.game || "").trim();
+    const a = String(row.playerA || "").trim();
+    const b = String(row.playerB || "").trim();
+    if (!game || !a || !b) {
+      report.push({ row: rowNum, ok: false, error: "Missing required game/playerA/playerB." });
+      return;
+    }
+    if (a.toLowerCase() === b.toLowerCase()) {
+      report.push({ row: rowNum, ok: false, error: "Player A and B must be different." });
+      return;
+    }
+    const startAt = parseWhen(row.startAt);
+    if (row.startAt && startAt == null) {
+      report.push({ row: rowNum, ok: false, error: `Unparseable startAt "${row.startAt}" (use YYYY-MM-DD HH:MM).` });
+      return;
+    }
+    const g = ensureGame(game);
+    const pa = ensurePlayer(a, row.playerA_org);
+    const pb = ensurePlayer(b, row.playerB_org);
+    db.matches.push({
+      id: id(), gameId: g.id, playerAId: pa.id, playerBId: pb.id,
+      time: String(row.time || "").trim(), day: String(row.day || "Today").trim(),
+      location: String(row.location || "").trim(),
+      status: "upcoming", result: null, winnerId: null,
+      startAt, endAt: null,
+    });
+    created += 1;
+    report.push({ row: rowNum, ok: true, match: `${g.name}: ${pa.name} vs ${pb.name}` });
+  });
+
+  gamesCreated = db.games.length - gamesBefore;
+  playersCreated = db.players.length - playersBefore;
+
+  if (created > 0) {
+    await saveDB(db);
+    broadcast("matches", {});
+    broadcast("games", {});
+  }
+  res.json({
+    ok: true,
+    summary: { rows: rows.length, created, skipped: rows.length - created, gamesCreated, playersCreated },
+    report,
+  });
 }));
 
 app.delete("/api/admin/matches/:matchId", requireAdmin, h(async (req, res) => {
@@ -860,6 +1050,51 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, h(async (req, res) 
   res.json({ ok: true, match, notify });
 }));
 
+// ---------- Time-based auto-status scheduler ----------
+// Every 20s: flip upcoming->live at startAt (fires notification + closes bids),
+// and live->over at endAt. Only acts on matches with the timestamps set and not
+// already decided; manual admin actions still take precedence.
+const SCHEDULER_INTERVAL_MS = 20 * 1000;
+let schedulerRunning = false;
+
+async function runScheduler() {
+  if (schedulerRunning) return; // avoid overlap
+  schedulerRunning = true;
+  try {
+    const now = Date.now();
+    const db = await loadDB();
+    let changed = false;
+    const wentLive = [];
+    for (const m of db.matches) {
+      if (isDecided(m)) continue;
+      if (m.status === "upcoming" && m.startAt && now >= m.startAt) {
+        m.status = "live";
+        changed = true;
+        wentLive.push(m);
+      } else if (m.status === "live" && m.endAt && now >= m.endAt) {
+        m.status = "over";
+        changed = true;
+      }
+    }
+    if (changed) {
+      await saveDB(db);
+      broadcast("matches", {});
+      broadcast("games", {});
+      // Fire live notifications for matches that just auto-went-live.
+      const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
+      for (const m of wentLive) {
+        broadcast("winner", { matchId: m.id }); // nudge clients (bids closed)
+        notifyMatchLive(db, m, baseUrl).catch((e) => console.error("[scheduler notify]", e.message));
+        console.log(`[scheduler] match ${m.id} auto -> live`);
+      }
+    }
+  } catch (e) {
+    console.error("[scheduler] error:", e.message);
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
 // ---------- Startup ----------
 (async () => {
   try {
@@ -868,6 +1103,8 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, h(async (req, res) 
     console.error("[startup] seed/DB error:", e.message);
     console.error("Ensure MySQL is running and schema.sql has been loaded.");
   }
+  setInterval(runScheduler, SCHEDULER_INTERVAL_MS);
+  runScheduler(); // run once at boot
   app.listen(PORT, () => {
     console.log(`SnapGames server running at http://localhost:${PORT}`);
     console.log(`Admin key: ${ADMIN_KEY}`);

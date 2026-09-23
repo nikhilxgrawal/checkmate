@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=13" />
+  <link rel="stylesheet" href="/style.css?v=22" />
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +13,7 @@
         <span class="sub">PLAY · PREDICT · COMPETE</span>
       </div>
       <nav class="nav">
+        <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
         <a href="/">Games</a>
         <a href="/community.html">Community</a>
         <a href="/admin.html">Admin</a>
@@ -53,6 +54,9 @@
 
     <!-- Standings tab -->
     <div id="tab-standings" class="tab-panel" style="display:none">
+      <div style="text-align:center"><span class="section-title">👑 Match Winners</span></div>
+      <p class="tab-note">Players ranked by results — win = 1 pt, draw = ½ pt each</p>
+      <div id="matchWinners" class="board"></div>
       <div style="text-align:center"><span class="section-title">🏆 Top Bidders</span></div>
       <p class="tab-note">Ranked by net winnings from settled bids in this game</p>
       <div id="winners" class="board"></div>
@@ -83,17 +87,40 @@
       <div id="stepCode" style="display:none">
         <p class="modal-sub">Enter the 6-digit code sent to <strong id="codeSentTo"></strong></p>
         <label>Verification Code</label>
-        <input id="vCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
+        <input id="vCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code" />
         <button class="btn" onclick="submitOtp()">Verify &amp; Continue</button>
         <button class="btn ghost small" onclick="showEmailStep()">Use a different email</button>
       </div>
     </div>
   </div>
 
+  <!-- Bid modal -->
+  <div id="bidModal" class="modal">
+    <div class="modal-card">
+      <button class="modal-close" onclick="closeBid()">×</button>
+      <h3>Place your bid</h3>
+      <p class="modal-sub">Backing <strong id="bidOutcome"></strong> · Balance <strong id="bidBalance"></strong></p>
+      <label>Bid amount (₹)</label>
+      <div class="bid-input-wrap">
+        <span class="bid-rupee">₹</span>
+        <input id="bidAmount" type="number" min="1" step="1" inputmode="numeric" placeholder="100" onkeydown="if(event.key==='Enter')submitBid()" />
+      </div>
+      <div class="bid-chips">
+        <button class="chip-btn" onclick="setBidAmount(100)">₹100</button>
+        <button class="chip-btn" onclick="setBidAmount(500)">₹500</button>
+        <button class="chip-btn" onclick="setBidAmount(1000)">₹1000</button>
+        <button class="chip-btn" onclick="setBidAmount('max')">Max</button>
+      </div>
+      <div id="bidError" class="bid-error"></div>
+      <button class="btn" onclick="submitBid()">Confirm Bid</button>
+      <p class="modal-sub" style="margin-top:10px">Pari-mutuel: winners split the whole pool. Bids close when the match goes live.</p>
+    </div>
+  </div>
+
   <div class="footer">SnapGames · Acevector</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js?v=13"></script>
+  <script src="/app.js?v=22"></script>
   <script>initGame();</script>
 </body>
 </html>

@@ -1,32 +1,193 @@
-:root {
+:root, [data-theme="dark"] {
   --red: #e4002b;
   --red-dark: #b00021;
-  --bg: #050608;
+  --bg: #070810;
   --bg-2: #0d0f14;
   --card: #12151c;
   --card-2: #171b24;
   --line: #262b36;
-  --white: #ffffff;
+  --white: #ffffff;      /* primary text color */
   --muted: #9aa3b2;
   --gold: #f5c542;
+
+  /* Glassmorphism tokens */
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-bg-strong: rgba(255, 255, 255, 0.10);
+  --glass-border: rgba(255, 255, 255, 0.14);
+  --glass-blur: 18px;
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+
+  /* Backdrop blobs (theme-specific alpha) */
+  --blob-red: rgba(228, 0, 43, 0.30);
+  --blob-blue: rgba(80, 120, 220, 0.22);
+  --blob-gold: rgba(245, 197, 66, 0.12);
+  --bg-gradient: linear-gradient(180deg, #0a0c16, var(--bg));
+  --topbar-bg: rgba(10, 12, 22, 0.55);
+  --input-bg: rgba(255, 255, 255, 0.06);
+  --mine-bubble: rgba(228, 0, 43, 0.18);
+}
+
+[data-theme="light"] {
+  --red: #e4002b;
+  --red-dark: #b00021;
+  --bg: #eef1f6;
+  --bg-2: #e4e8f0;
+  --card: #ffffff;
+  --card-2: #f4f6fa;
+  --line: #d3d9e3;
+  --white: #14171f;      /* primary text color = dark in light mode */
+  --muted: #5b6472;
+  --gold: #c9962a;
+
+  /* Light frosted glass: dark-tinted translucency on a bright backdrop */
+  --glass-bg: rgba(255, 255, 255, 0.55);
+  --glass-bg-strong: rgba(255, 255, 255, 0.72);
+  --glass-border: rgba(20, 25, 40, 0.12);
+  --glass-blur: 18px;
+  --glass-shadow: 0 8px 30px rgba(30, 40, 70, 0.14);
+
+  --blob-red: rgba(228, 0, 43, 0.14);
+  --blob-blue: rgba(80, 120, 220, 0.14);
+  --blob-gold: rgba(245, 197, 66, 0.14);
+  --bg-gradient: linear-gradient(180deg, #f3f6fb, var(--bg));
+  --topbar-bg: rgba(255, 255, 255, 0.65);
+  --input-bg: rgba(255, 255, 255, 0.75);
+  --mine-bubble: rgba(228, 0, 43, 0.12);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
-  font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   background:
-    radial-gradient(1200px 600px at 80% -10%, rgba(228, 0, 43, 0.18), transparent 60%),
-    radial-gradient(900px 500px at -10% 10%, rgba(80, 120, 200, 0.10), transparent 55%),
-    var(--bg);
+    radial-gradient(900px 500px at 82% -8%, var(--blob-red), transparent 60%),
+    radial-gradient(800px 520px at -10% 8%, var(--blob-blue), transparent 58%),
+    radial-gradient(700px 500px at 50% 110%, var(--blob-gold), transparent 60%),
+    var(--bg-gradient);
+  background-attachment: fixed;
   color: var(--white);
   min-height: 100vh;
   line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  transition: color 0.25s ease;
 }
 
 a { color: inherit; text-decoration: none; }
 
+/* ---------- Glassmorphism surfaces (Apple-style frosted glass) ---------- */
+.topbar {
+  background: var(--topbar-bg) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+}
+.card,
+.match-card,
+.game-card,
+.board,
+.post,
+.mod-item,
+.chat-window,
+.chat-composer,
+.verify-bar,
+.notify-bar,
+.wallet-bar,
+.stats-bar .stat,
+.modal-card,
+.pending-notice {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  backdrop-filter: blur(var(--glass-blur)) saturate(140%);
+  border: 1px solid var(--glass-border) !important;
+  box-shadow: var(--glass-shadow);
+}
+/* Inner elements sit on subtle glass too */
+.bet-opt, .draw-pick, .player, .list-item, .board-row, .chat-bubble {
+  background: var(--glass-bg) !important;
+  border-color: var(--glass-border);
+}
+.chat-msg.mine .chat-bubble { background: var(--mine-bubble) !important; }
+/* Frosted inputs */
+input, select, textarea {
+  background: var(--input-bg) !important;
+  border: 1px solid var(--glass-border) !important;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+/* Modal backdrop stronger blur */
+.modal {
+  background: rgba(5, 6, 10, 0.45);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+/* Glass buttons keep the red identity but glossier */
+.btn {
+  box-shadow: 0 6px 20px rgba(228, 0, 43, 0.30);
+}
+.btn.ghost {
+  background: var(--glass-bg) !important;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border) !important;
+}
+/* Hover lift feels more glassy */
+.game-card:hover, .match-card:hover { box-shadow: 0 14px 40px rgba(0,0,0,0.5); border-color: rgba(255,255,255,0.24) !important; }
+/* Graceful fallback: if backdrop-filter unsupported, use more opaque bg */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .card, .match-card, .game-card, .board, .post, .chat-window, .chat-composer,
+  .modal-card, .verify-bar, .notify-bar, .wallet-bar, .stats-bar .stat, .topbar {
+    background: rgba(20, 23, 32, 0.92) !important;
+  }
+}
+
 .container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+
+/* ---------- Theme toggle button ---------- */
+.theme-toggle {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border);
+  color: var(--white);
+  border-radius: 10px;
+  width: 38px; height: 38px;
+  font-size: 17px;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+.theme-toggle:hover { transform: translateY(-1px); background: var(--glass-bg-strong); }
+
+/* ---------- Transitions & entrance animations ---------- */
+@keyframes fadeInUp {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+/* Page content fades/rises in on load */
+main.container { animation: fadeInUp 0.35s ease both; }
+.hero { animation: fadeIn 0.5s ease both; }
+/* Tab panels re-animate when shown */
+.tab-panel.tab-anim { animation: fadeInUp 0.3s ease both; }
+/* Cards, game cards, board rows and posts ease in */
+.match-card, .game-card, .board-row, .post, .stat, .chat-msg {
+  animation: fadeInUp 0.3s ease both;
+}
+/* Smooth interactive transitions */
+.tab, .game-card, .bet-opt, .btn, .chip-btn, .player, .draw-pick {
+  transition: transform 0.15s ease, background 0.15s ease,
+    border-color 0.15s ease, box-shadow 0.15s ease, color 0.15s ease;
+}
+/* Active tab underline slides */
+.tab { position: relative; }
+/* Respect users who prefer no motion */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 
 /* ---------- Header ---------- */
 .topbar {
@@ -453,6 +614,78 @@ input:focus, select:focus { outline: none; border-color: var(--red); }
   .hero { padding-top: 32px; }
 }
 
+/* ---------- Mobile responsiveness ---------- */
+html, body { max-width: 100%; overflow-x: hidden; }
+img, .board, .card, .match-card, .game-card { max-width: 100%; }
+
+@media (max-width: 720px) {
+  .container { padding: 0 14px; }
+
+  /* Topbar: brand left, nav becomes a horizontally-scrollable row */
+  .topbar-inner { height: auto; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 0; }
+  .brand { font-size: 20px; text-align: center; }
+  .nav {
+    justify-content: center;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 4px;
+    padding-bottom: 2px;
+  }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { padding: 8px 12px; font-size: 13px; white-space: nowrap; }
+
+  /* Hero smaller on phones */
+  .hero { padding: 28px 14px 20px; }
+  .hero .tagline { font-size: 15px; }
+  .hero .subtitle { font-size: 12px; letter-spacing: 2px; }
+
+  /* Grids collapse to one column */
+  .matches-grid, .games-grid { grid-template-columns: 1fr; gap: 14px; }
+
+  /* Stats bar wraps tighter */
+  .stats-bar { gap: 8px; }
+  .stats-bar .stat { min-width: 72px; padding: 10px 12px; }
+  .stats-bar .stat-n { font-size: 20px; }
+
+  /* Tabs: horizontal scroll if they overflow */
+  .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab { padding: 10px 14px; font-size: 14px; white-space: nowrap; }
+
+  /* Game page header stacks */
+  .game-header { gap: 12px; }
+  .game-title { font-size: 24px; }
+  .game-emoji.big { font-size: 42px; }
+
+  /* Section titles + forms */
+  .section-title { font-size: 13px; padding: 7px 16px; }
+  .card { padding: 16px; }
+
+  /* Bigger tap targets */
+  .btn { padding: 13px 18px; }
+  .bet-opt { padding: 12px 14px; }
+  input, select, textarea { font-size: 16px; } /* 16px prevents iOS zoom-on-focus */
+
+  /* Chat window a bit shorter, bubbles wider */
+  .chat-window { height: 55vh; }
+  .chat-bubble { max-width: 85%; }
+
+  /* Modals fit small screens */
+  .modal { padding: 12px; }
+  .modal-card { padding: 20px; }
+
+  /* Admin match rows stack */
+  .list-item { flex-direction: column; align-items: stretch; gap: 8px; }
+  .status-toggle { flex-wrap: wrap; }
+}
+
+@media (max-width: 400px) {
+  .stats-bar .stat { min-width: 64px; padding: 8px 10px; }
+  .bet-figs { gap: 8px; }
+  .hero h1 { letter-spacing: 1px; }
+}
+
 /* ---------- Verify bar + modal ---------- */
 .verify-bar {
   display: flex;
@@ -518,6 +751,24 @@ input:focus, select:focus { outline: none; border-color: var(--red); }
 .modal-close:hover { color: #fff; }
 .modal-card .btn { width: 100%; }
 .modal-card .btn.ghost { margin-top: 8px; }
+
+/* ---------- Bid modal ---------- */
+.bid-input-wrap { position: relative; }
+.bid-input-wrap .bid-rupee {
+  position: absolute; left: 14px; top: 50%; transform: translateY(-50%);
+  color: var(--muted); font-weight: 800; font-size: 16px;
+}
+.bid-input-wrap input {
+  padding-left: 30px; font-size: 20px; font-weight: 800;
+}
+.bid-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.chip-btn {
+  flex: 1; min-width: 60px;
+  background: var(--bg-2); border: 1px solid var(--line); color: #fff;
+  border-radius: 8px; padding: 8px 6px; font-weight: 700; font-size: 13px; cursor: pointer;
+}
+.chip-btn:hover { border-color: var(--red); }
+.bid-error { color: var(--red); font-size: 13px; min-height: 18px; margin-top: 8px; }
 
 /* ---------- Predict hint ---------- */
 .predict-hint {
@@ -744,3 +995,30 @@ input:focus, select:focus { outline: none; border-color: var(--red); }
 .status-toggle .seg.on { background: var(--card-2); color: #fff; }
 .status-toggle .seg.on.live { background: var(--red); color: #fff; }
 .status-toggle .seg.on.over { background: #6b7078; color: #fff; }
+
+
+/* ---------- Light-theme text fixes (elements that used hardcoded #fff on glass) ---------- */
+[data-theme="light"] .wallet-bar strong,
+[data-theme="light"] .pool-line strong,
+[data-theme="light"] .post-as strong,
+[data-theme="light"] .chat-as strong,
+[data-theme="light"] .verify-ok strong { color: var(--white); }
+
+/* Tabs / links: use dark text on hover & active in light mode */
+[data-theme="light"] .tab:hover,
+[data-theme="light"] .tab.active,
+[data-theme="light"] .back-link:hover,
+[data-theme="light"] .modal-close:hover { color: var(--white); }
+
+/* Admin status toggle: "on" (non-live) segment sits on a light card in light mode */
+[data-theme="light"] .status-toggle .seg:hover,
+[data-theme="light"] .status-toggle .seg.on { color: var(--white); }
+[data-theme="light"] .status-toggle .seg.on { background: rgba(20,25,40,0.10); }
+
+/* Ghost buttons (e.g. Log Out): ensure readable dark text in light mode */
+[data-theme="light"] .btn.ghost { color: var(--white); }
+
+/* Theme toggle + chat delete etc. inherit --white already; ensure toggle text is dark */
+[data-theme="light"] .theme-toggle { color: var(--white); }
+
+/* Chat "×" delete and muted crowns already use --muted which is dark in light mode. */

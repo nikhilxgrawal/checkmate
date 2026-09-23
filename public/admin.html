@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin — SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=13" />
+  <link rel="stylesheet" href="/style.css?v=22" />
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +13,7 @@
         <span class="sub">ADMIN CONTROL</span>
       </div>
       <nav class="nav">
+        <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
         <a href="/">Games</a>
         <a href="/community.html">Community</a>
         <a href="/admin.html" class="active">Admin</a>
@@ -63,12 +64,27 @@
           <div><label>Player B</label><select id="mB"></select></div>
         </div>
         <div class="row">
-          <div><label>Time Slot</label><input id="mTime" placeholder="e.g. 1:30 PM - 2:00 PM" /></div>
-          <div><label>Day</label><input id="mDay" placeholder="Today" value="Today" /></div>
+          <div><label>Time Slot (display)</label><input id="mTime" placeholder="e.g. 1:30 PM - 2:00 PM" /></div>
+          <div><label>Day (display)</label><input id="mDay" placeholder="Today" value="Today" /></div>
         </div>
-        <label>Location</label>
-        <input id="mLoc" placeholder="e.g. Sky Deck - Tower A" />
+        <div class="row">
+          <div><label>Location</label><input id="mLoc" placeholder="e.g. Sky Deck - Tower A" /></div>
+          <div><label>Auto go-live at (optional)</label><input id="mStartAt" type="datetime-local" /></div>
+        </div>
+        <p style="color:var(--muted);font-size:12px;margin:6px 0 0">If "Auto go-live at" is set, the match will automatically become Live at that time (closing bids and notifying users).</p>
         <button class="btn" onclick="addMatch()">Add Match</button>
+      </div>
+
+      <div style="text-align:center"><span class="section-title">⬆️ Bulk Upload Matches (.xlsx)</span></div>
+      <div class="card">
+        <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+          Upload an Excel file — one match per row. Games and players are auto-created by name.
+          Best-effort: valid rows import, invalid rows are skipped and reported.
+          <a href="/api/admin/matches/template" class="back-link" style="color:var(--red)">⬇ Download template</a>
+        </p>
+        <input id="bulkFile" type="file" accept=".xlsx,.xls" />
+        <button class="btn small" onclick="bulkUpload()">Upload</button>
+        <div id="bulkResult" style="margin-top:14px"></div>
       </div>
 
       <div style="text-align:center"><span class="section-title">Manage Matches & Results</span></div>
@@ -91,7 +107,7 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/app.js?v=13"></script>
+  <script src="/app.js?v=22"></script>
   <script>initAdmin();</script>
 </body>
 </html>

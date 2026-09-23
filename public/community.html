@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Community — SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=13" />
+  <link rel="stylesheet" href="/style.css?v=22" />
 </head>
 <body>
   <header class="topbar">
@@ -13,6 +13,7 @@
         <span class="sub">COMMUNITY</span>
       </div>
       <nav class="nav">
+        <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
         <a href="/">Games</a>
         <a href="/community.html" class="active">Community</a>
         <a href="/admin.html">Admin</a>
@@ -48,7 +49,7 @@
       <div id="stepCode" style="display:none">
         <p class="modal-sub">Enter the 6-digit code sent to <strong id="codeSentTo"></strong></p>
         <label>Verification Code</label>
-        <input id="vCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" />
+        <input id="vCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code" />
         <button class="btn" onclick="submitOtp()">Verify &amp; Continue</button>
         <button class="btn ghost small" onclick="showEmailStep()">Use a different email</button>
       </div>
@@ -58,7 +59,7 @@
   <div class="footer">SnapGames · Acevector · Community</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js?v=13"></script>
+  <script src="/app.js?v=22"></script>
   <script>initCommunity();</script>
 </body>
 </html>

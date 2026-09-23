@@ -1,3 +1,29 @@
+// ---------- Theme (dark / light) ----------
+function getTheme() {
+  const saved = localStorage.getItem("cm_theme");
+  if (saved === "light" || saved === "dark") return saved;
+  // default to OS preference
+  return window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+}
+function applyTheme(t) {
+  document.documentElement.setAttribute("data-theme", t);
+  const btn = document.getElementById("themeToggle");
+  if (btn) btn.textContent = t === "light" ? "🌙" : "☀️"; // icon = what you'd switch TO
+}
+function toggleTheme() {
+  const next = getTheme() === "light" ? "dark" : "light";
+  localStorage.setItem("cm_theme", next);
+  applyTheme(next);
+}
+// Apply immediately (before DOM ready is fine; sets attribute on <html>)
+applyTheme(getTheme());
+// Re-apply once the toggle button exists so its icon is set correctly.
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => applyTheme(getTheme()));
+} else {
+  applyTheme(getTheme());
+}
+
 // ---------- Shared helpers ----------
 var CURRENT_GAME_ID = null; // set on the per-game page
 function api(path, opts = {}) {
@@ -116,6 +142,16 @@ function showCodeStep(email) {
   document.getElementById("stepEmail").style.display = "none";
   document.getElementById("stepCode").style.display = "block";
   document.getElementById("codeSentTo").textContent = email;
+  const code = document.getElementById("vCode");
+  if (code) {
+    code.value = "";
+    // Auto-submit as soon as a full 6-digit code is typed or pasted.
+    code.oninput = () => {
+      code.value = code.value.replace(/\D/g, "").slice(0, 6); // digits only
+      if (code.value.length === 6) submitOtp();
+    };
+    setTimeout(() => code.focus(), 60);
+  }
 }
 
 async function requestOtp() {
@@ -228,7 +264,7 @@ function renderWalletBar() {
   if (!el) return;
   if (!isVerified()) { el.style.display = "none"; return; }
   el.style.display = "";
-  el.innerHTML = `💰 Your balance: <strong>${MY_BALANCE == null ? "…" : MY_BALANCE}</strong> points`;
+  el.innerHTML = `💰 Your balance: <strong>₹${MY_BALANCE == null ? "…" : MY_BALANCE}</strong>`;
 }
 
 function setSection(key, container, list, emptyMsg) {
@@ -252,7 +288,7 @@ function outcomeRow(m, key, label, stakeOnThis, odds, betOpen, myBet, isWinnerOu
   const right = isWinnerOutcome
     ? `<span class="bet-tag won-tag">WON</span>`
     : mineHere
-    ? `<span class="bet-tag mine-tag">Your bid · ${myBet.stake}${myBet.settled ? ` → +${myBet.payout}` : ""}</span>`
+    ? `<span class="bet-tag mine-tag">Your bid · ₹${myBet.stake}${myBet.settled ? ` → +₹${myBet.payout}` : ""}</span>`
     : betOpen && !myBet
     ? `<span class="bet-tag">Bid</span>`
     : "";
@@ -261,7 +297,7 @@ function outcomeRow(m, key, label, stakeOnThis, odds, betOpen, myBet, isWinnerOu
       <div class="bet-label">${label}</div>
       <div class="bet-figs">
         <span class="bet-odds">${oddsLabel(odds)}</span>
-        <span class="bet-pool">${stakeOnThis} pts</span>
+        <span class="bet-pool">₹${stakeOnThis}</span>
       </div>
       ${right}
     </div>`;
@@ -283,7 +319,7 @@ function matchCardHTML(m) {
   const pctB = 100 - pctA - pctD;
   const wo = m.result ? (m.isDraw ? "draw" : (m.winner && m.winner.id === m.playerAId ? "A" : "B")) : null;
   const hint = betOpen
-    ? (myBet ? `You bid ${myBet.stake} pts on ${myBet.outcome === "draw" ? "Draw" : myBet.outcome === "A" ? esc(m.playerA.name) : esc(m.playerB.name)}` : "Place your bid (1–20 pts)")
+    ? (myBet ? `You bid ₹${myBet.stake} on ${myBet.outcome === "draw" ? "Draw" : myBet.outcome === "A" ? esc(m.playerA.name) : esc(m.playerB.name)}` : "Place your bid")
     : isLive ? "🔴 Live — bidding closed"
     : isOver ? "🏁 Game over — awaiting result"
     : "Bidding closed";
@@ -301,7 +337,7 @@ function matchCardHTML(m) {
       <span class="vs-sm">vs</span>
       <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong>
     </div>
-    <div class="pool-line">Pool: <strong>${total}</strong> pts · ${m.betCount} bid${m.betCount === 1 ? "" : "s"}</div>
+    <div class="pool-line">Pool: <strong>₹${total}</strong> · ${m.betCount} bid${m.betCount === 1 ? "" : "s"}</div>
     <div class="bet-opts">
       ${outcomeRow(m, "A", m.playerA ? m.playerA.name : "Player A", m.pool.A, m.odds.A, betOpen, myBet, wo === "A")}
       ${outcomeRow(m, "draw", "🤝 Draw", m.pool.draw, m.odds.draw, betOpen, myBet, wo === "draw")}
@@ -316,17 +352,58 @@ function matchCardHTML(m) {
   </div>`;
 }
 
-// Open the bid stake prompt for a chosen outcome.
+// Open the styled bid modal for a chosen outcome.
+let _pendingBid = null; // { matchId, outcome, label }
 function openBet(matchId, outcome, label) {
   if (!isVerified()) { openVerify(); toast("Verify your Snapdeal email to bid.", "err"); return; }
-  const raw = prompt(`Bid on ${label}\nYour balance: ${MY_BALANCE} pts\nEnter bid amount (1–20):`, "10");
-  if (raw === null) return;
-  const stake = Math.floor(Number(raw));
-  if (!Number.isFinite(stake) || stake < 1 || stake > 20) {
-    toast("Bid must be a whole number from 1 to 20.", "err");
+  _pendingBid = { matchId, outcome, label };
+  const modal = document.getElementById("bidModal");
+  if (!modal) {
+    // Fallback if the modal markup isn't present on the page.
+    const raw = prompt(`Bid on ${label} (₹):`, "100");
+    if (raw === null) return;
+    return placeBet(matchId, outcome, Math.floor(Number(raw)));
+  }
+  document.getElementById("bidOutcome").textContent = label;
+  document.getElementById("bidBalance").textContent = "₹" + MY_BALANCE;
+  const input = document.getElementById("bidAmount");
+  input.value = "";
+  document.getElementById("bidError").textContent = "";
+  modal.style.display = "flex";
+  setTimeout(() => input.focus(), 50);
+}
+
+function closeBid() {
+  const m = document.getElementById("bidModal");
+  if (m) m.style.display = "none";
+  _pendingBid = null;
+}
+
+function submitBid() {
+  if (!_pendingBid) return;
+  const input = document.getElementById("bidAmount");
+  const errEl = document.getElementById("bidError");
+  const stake = Math.floor(Number(input.value));
+  if (!Number.isFinite(stake) || stake < 1) {
+    errEl.textContent = "Enter a whole amount of at least ₹1.";
     return;
   }
+  if (stake > MY_BALANCE) {
+    errEl.textContent = `That's more than your balance (₹${MY_BALANCE}).`;
+    return;
+  }
+  const { matchId, outcome } = _pendingBid;
+  closeBid();
   placeBet(matchId, outcome, stake);
+}
+
+// Quick-fill chips inside the modal
+function setBidAmount(v) {
+  const input = document.getElementById("bidAmount");
+  if (!input) return;
+  input.value = v === "max" ? MY_BALANCE : v;
+  document.getElementById("bidError").textContent = "";
+  input.focus();
 }
 
 async function placeBet(matchId, outcome, stake) {
@@ -336,7 +413,7 @@ async function placeBet(matchId, outcome, stake) {
       body: JSON.stringify({ outcome, stake, sessionToken: getSession().token }),
     });
     MY_BALANCE = r.balance;
-    toast(`Bid placed: ${stake} pts. Balance: ${r.balance}`, "ok");
+    toast(`Bid placed: ₹${stake}. Balance: ₹${r.balance}`, "ok");
     renderMatches(CURRENT_GAME_ID);
     renderNotifyBar();
   } catch (e) {
@@ -350,18 +427,30 @@ async function placeBet(matchId, outcome, stake) {
 async function renderLeaderboards(gameId) {
   const q = gameId ? `?gameId=${encodeURIComponent(gameId)}` : "";
   try {
-    const [bettors, backed] = await Promise.all([
+    const [winnersBoard, bettors, backed] = await Promise.all([
+      api("/api/leaderboard/winners" + q),
       api("/api/leaderboard/bettors" + q),
       api("/api/leaderboard/backed" + q),
     ]);
+
+    // Match winners (chess points: win=1, draw=0.5 each)
+    const mwEl = document.getElementById("matchWinners");
+    if (mwEl) mwEl.innerHTML = winnersBoard.length
+      ? winnersBoard.map((p, i) => {
+          const sub = `${p.wins} win${p.wins === 1 ? "" : "s"}` +
+            (p.draws ? ` · ${p.draws} draw${p.draws === 1 ? "" : "s"}` : "");
+          const pts = Number.isInteger(p.points) ? p.points : p.points.toFixed(1);
+          return boardRow(i, p.name, sub, pts, "win", "pt" + (p.points === 1 ? "" : "s"));
+        }).join("")
+      : '<div class="empty">No match results yet. Winners appear once matches are decided.</div>';
 
     // Top bettors by net winnings (settled bets)
     const wEl = document.getElementById("winners");
     if (wEl) wEl.innerHTML = bettors.length
       ? bettors.map((p, i) => {
-          const sub = `${p.balance} pts balance · staked ${p.staked}, won ${p.won}`;
-          const net = (p.net > 0 ? "+" : "") + p.net;
-          return boardRow(i, p.name, sub, net, p.net >= 0 ? "win" : "", "net pts");
+          const sub = `₹${p.balance} balance · staked ₹${p.staked}, won ₹${p.won}`;
+          const net = (p.net > 0 ? "+₹" : p.net < 0 ? "-₹" : "₹") + Math.abs(p.net);
+          return boardRow(i, p.name, sub, net, p.net >= 0 ? "win" : "", "net");
         }).join("")
       : '<div class="empty">No settled bids yet. Winnings show once matches have results.</div>';
 
@@ -370,10 +459,10 @@ async function renderLeaderboards(gameId) {
     if (pEl) {
       const players = (backed.players || []);
       let html = players.length
-        ? players.map((p, i) => boardRow(i, p.name, p.org, p.staked, "", "pts backed")).join("")
+        ? players.map((p, i) => boardRow(i, p.name, p.org, p.staked, "", "₹ backed")).join("")
         : "";
       if (backed.drawStake) {
-        html += boardRow(players.length, "🤝 Draw", "points on a draw", backed.drawStake, "", "pts backed");
+        html += boardRow(players.length, "🤝 Draw", "points on a draw", backed.drawStake, "", "₹ backed");
       }
       pEl.innerHTML = html || '<div class="empty">No bids placed yet.</div>';
     }
@@ -583,7 +672,7 @@ async function renderStats() {
       <div class="stat"><div class="stat-n">${s.liveMatches}</div><div class="stat-l">Live now</div></div>
       <div class="stat"><div class="stat-n">${s.matches}</div><div class="stat-l">Matches</div></div>
       <div class="stat"><div class="stat-n">${s.bids}</div><div class="stat-l">Bids</div></div>
-      <div class="stat"><div class="stat-n">${s.pointsWagered}</div><div class="stat-l">Points Bid</div></div>
+      <div class="stat"><div class="stat-n">₹${s.pointsWagered}</div><div class="stat-l">Total Bid</div></div>
       <div class="stat"><div class="stat-n">${s.players}</div><div class="stat-l">Players</div></div>`;
   } catch { /* ignore */ }
 }
@@ -656,7 +745,16 @@ async function renderGameHeader() {
 function switchTab(name) {
   ["matches", "standings", "chat"].forEach((t) => {
     const panel = document.getElementById("tab-" + t);
-    if (panel) panel.style.display = t === name ? "" : "none";
+    if (!panel) return;
+    if (t === name) {
+      panel.style.display = "";
+      // restart the fade-in animation each time this tab is shown
+      panel.classList.remove("tab-anim");
+      void panel.offsetWidth; // force reflow so the animation replays
+      panel.classList.add("tab-anim");
+    } else {
+      panel.style.display = "none";
+    }
   });
   document.querySelectorAll(".tab").forEach((b) => {
     b.classList.toggle("active", b.dataset.tab === name);
@@ -1070,17 +1168,58 @@ async function addMatch() {
   const time = document.getElementById("mTime").value.trim();
   const day = document.getElementById("mDay").value.trim();
   const location = document.getElementById("mLoc").value.trim();
+  const startAtEl = document.getElementById("mStartAt");
+  const startAt = startAtEl && startAtEl.value ? startAtEl.value : null; // "YYYY-MM-DDTHH:MM"
   if (!gameId) return toast("Pick a game (add one first if none)", "err");
   if (playerAId === playerBId) return toast("Pick two different players", "err");
   try {
     await api("/api/admin/matches", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location }),
+      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location, startAt }),
     });
     document.getElementById("mTime").value = "";
-    toast("Match added", "ok");
+    if (startAtEl) startAtEl.value = "";
+    toast(startAt ? "Match added — will auto go-live at set time" : "Match added", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
+}
+
+// Bulk upload matches from an .xlsx file.
+async function bulkUpload() {
+  const input = document.getElementById("bulkFile");
+  const resultEl = document.getElementById("bulkResult");
+  if (!input || !input.files || !input.files[0]) return toast("Choose an .xlsx file first", "err");
+  const fd = new FormData();
+  fd.append("file", input.files[0]);
+  resultEl.innerHTML = '<div style="color:var(--muted)">Uploading…</div>';
+  try {
+    // Note: no Content-Type header — the browser sets multipart boundary; admin key via header.
+    const r = await fetch("/api/admin/matches/bulk", {
+      method: "POST",
+      headers: adminHeaders(), // x-admin-key only
+      body: fd,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.error || "Upload failed");
+    const s = data.summary;
+    const rowsHtml = data.report.map((row) =>
+      `<div class="list-item" style="padding:6px 0">
+         <span>Row ${row.row}</span>
+         <span style="margin-left:auto;color:${row.ok ? "#3fbf6f" : "var(--red)"}">${row.ok ? "✓ " + esc(row.match) : "✕ " + esc(row.error)}</span>
+       </div>`).join("");
+    resultEl.innerHTML = `
+      <div class="pending-notice" style="display:block">
+        Imported <strong>${s.created}</strong> of ${s.rows} rows · skipped ${s.skipped} ·
+        games created ${s.gamesCreated} · players created ${s.playersCreated}
+      </div>
+      ${rowsHtml}`;
+    input.value = "";
+    toast(`Bulk upload: ${s.created} added, ${s.skipped} skipped`, s.created ? "ok" : "err");
+    loadAdminData();
+  } catch (e) {
+    resultEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    toast(e.message, "err");
+  }
 }
 
 async function delMatch(id) {

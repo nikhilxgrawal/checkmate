@@ -26,7 +26,9 @@ CREATE TABLE IF NOT EXISTS matches (
   location VARCHAR(255) DEFAULT '',
   status VARCHAR(16) DEFAULT 'upcoming',  -- 'upcoming' | 'live' | 'over' | 'finished'
   result VARCHAR(32) DEFAULT NULL,        -- 'draw' | playerId | NULL
-  winnerId VARCHAR(32) DEFAULT NULL       -- legacy, kept in sync with result
+  winnerId VARCHAR(32) DEFAULT NULL,      -- legacy, kept in sync with result
+  startAt BIGINT DEFAULT NULL,            -- epoch ms; auto-go-live at this time
+  endAt BIGINT DEFAULT NULL               -- epoch ms; auto-mark 'over' at this time
 );
 
 -- Pari-mutuel bids. One bid per (matchId, email). outcome is 'A' | 'B' | 'draw'.
