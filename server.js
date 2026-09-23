@@ -25,7 +25,9 @@ function loadDB() {
     db.games = db.games || [];
     db.players = db.players || [];
     db.matches = db.matches || [];
-    db.predictions = db.predictions || db.votes || []; // migrate old "votes"
+    db.predictions = db.predictions || db.votes || []; // legacy (kept, unused by betting)
+    db.bets = db.bets || [];       // { id, matchId, email, outcome, stake, ts, settled, payout }
+    db.wallets = db.wallets || {}; // email -> balance (points)
     db.posts = db.posts || [];
     db.chat = db.chat || [];
     db.notifyOptIns = db.notifyOptIns || [];
@@ -49,8 +51,8 @@ function loadDB() {
     return db;
   } catch (e) {
     return {
-      games: [], players: [], matches: [], predictions: [],
-      posts: [], chat: [], notifyOptIns: [],
+      games: [], players: [], matches: [], predictions: [], bets: [],
+      wallets: {}, posts: [], chat: [], notifyOptIns: [],
     };
   }
 }
@@ -109,7 +111,8 @@ function seedIfEmpty() {
     ];
     saveDB({
       games: [chess], players, matches,
-      predictions: [], posts: [], chat: [], notifyOptIns: [],
+      predictions: [], bets: [], wallets: {},
+      posts: [], chat: [], notifyOptIns: [],
     });
   }
 }
@@ -160,6 +163,93 @@ function playerMap(db) {
   const m = {};
   db.players.forEach((p) => (m[p.id] = p));
   return m;
+}
+
+// ---- Wallet / betting helpers ----
+const START_BALANCE = 100;
+const MAX_STAKE = 20;
+
+// Get a user's balance, initializing to START_BALANCE on first access.
+function getBalance(db, email) {
+  if (db.wallets[email] === undefined) db.wallets[email] = START_BALANCE;
+  return db.wallets[email];
+}
+
+// Compute the pari-mutuel pool for a match: total staked per outcome,
+// live decimal odds (totalPool / outcomePool), and grand total.
+function matchPool(db, matchId) {
+  const bets = db.bets.filter((b) => b.matchId === matchId);
+  const pools = { A: 0, B: 0, draw: 0 };
+  bets.forEach((b) => { pools[b.outcome] = (pools[b.outcome] || 0) + b.stake; });
+  const total = pools.A + pools.B + pools.draw;
+  // Decimal odds: payout multiple on a winning stake if that outcome wins and
+  // the whole pool is split proportionally. odds = total / outcomePool.
+  const odds = {
+    A: pools.A > 0 ? +(total / pools.A).toFixed(2) : null,
+    B: pools.B > 0 ? +(total / pools.B).toFixed(2) : null,
+    draw: pools.draw > 0 ? +(total / pools.draw).toFixed(2) : null,
+  };
+  return { pools, total, odds, count: bets.length };
+}
+
+// The outcome key ("A" | "B" | "draw") that actually won, from a match result.
+function winningOutcome(match) {
+  const r = matchResult(match);
+  if (!r) return null;
+  if (r === "draw") return "draw";
+  if (r === match.playerAId) return "A";
+  if (r === match.playerBId) return "B";
+  return null;
+}
+
+// Pari-mutuel settlement. Winners split the ENTIRE pool proportional to stake;
+// losers forfeit. Credits payouts to wallets. Idempotent-safe when combined
+// with unsettleMatch (call unsettle before re-settling on result change).
+// Edge cases:
+//  - No winning-side bets: pool is forfeited (no one to pay); returns {noWinners:true}.
+//  - Only winners, no losers: each winner simply gets their own stake back.
+function settleMatch(db, match) {
+  const outcome = winningOutcome(match);
+  if (!outcome) return { settled: false };
+  const bets = db.bets.filter((b) => b.matchId === match.id);
+  const total = bets.reduce((s, b) => s + b.stake, 0);
+  const winners = bets.filter((b) => b.outcome === outcome);
+  const winnerStake = winners.reduce((s, b) => s + b.stake, 0);
+
+  let paid = 0;
+  if (winnerStake > 0) {
+    // Distribute proportionally; use floor and give remainder to the largest winner.
+    let remaining = total;
+    winners
+      .sort((a, b) => b.stake - a.stake)
+      .forEach((b, i) => {
+        let share;
+        if (i === winners.length - 1) {
+          share = remaining; // last winner absorbs rounding remainder
+        } else {
+          share = Math.floor((b.stake / winnerStake) * total);
+          remaining -= share;
+        }
+        db.wallets[b.email] = (db.wallets[b.email] || 0) + share;
+        b.payout = share;
+        b.settled = true;
+        paid += share;
+      });
+  }
+  // Losers (and, if no winners, everyone) are already settled with payout 0.
+  bets.forEach((b) => { b.settled = true; if (b.outcome !== outcome) b.payout = 0; });
+  return { settled: true, outcome, total, winnerStake, paid, noWinners: winnerStake === 0 };
+}
+
+// Reverse a settlement: reclaim credited payouts back out of wallets and mark
+// bets unsettled. Used when an admin changes or clears a result.
+function unsettleMatch(db, match) {
+  const bets = db.bets.filter((b) => b.matchId === match.id && b.settled);
+  bets.forEach((b) => {
+    if (b.payout) db.wallets[b.email] = (db.wallets[b.email] || 0) - b.payout;
+    b.payout = 0;
+    b.settled = false;
+  });
 }
 
 // ---- Notification opt-in helpers (server-side list keyed by verified email) ----
@@ -257,11 +347,13 @@ app.get("/api/games/:gameId", (req, res) => {
 app.get("/api/stats", (req, res) => {
   const db = loadDB();
   const liveMatches = db.matches.filter((m) => effectiveStatus(m) === "live").length;
+  const pointsWagered = db.bets.reduce((s, b) => s + b.stake, 0);
   res.json({
     games: db.games.length,
     matches: db.matches.length,
     liveMatches,
-    predictions: db.predictions.length,
+    bets: db.bets.length,
+    pointsWagered,
     players: db.players.length,
   });
 });
@@ -300,16 +392,8 @@ app.get("/api/matches", (req, res) => {
   const gameId = req.query.gameId;
   const source = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
   const matches = source.map((match) => {
-    const votesA = db.predictions.filter(
-      (v) => v.matchId === match.id && v.playerId === match.playerAId
-    ).length;
-    const votesB = db.predictions.filter(
-      (v) => v.matchId === match.id && v.playerId === match.playerBId
-    ).length;
-    const votesDraw = db.predictions.filter(
-      (v) => v.matchId === match.id && v.playerId === "draw"
-    ).length;
     const result = matchResult(match);
+    const { pools, total, odds, count } = matchPool(db, match.id);
     return {
       ...match,
       result,
@@ -319,9 +403,10 @@ app.get("/api/matches", (req, res) => {
       winner:
         result && result !== "draw" ? pm[result] || null : null,
       status: effectiveStatus(match),
-      votesA,
-      votesB,
-      votesDraw,
+      pool: pools,      // { A, B, draw } points staked
+      poolTotal: total, // grand total staked
+      odds,             // { A, B, draw } decimal odds (null if none)
+      betCount: count,
     };
   });
   res.json(matches);
@@ -341,75 +426,82 @@ app.post("/api/auth/verify-otp", (req, res) => {
   res.json({ ok: true, token: result.token, email: result.email, name: nameFromEmail(result.email) });
 });
 
-// ---- Predictions ----
-// Predict the outcome of a match: a player, or "draw".
-// One prediction per verified EMAIL per match.
-app.post("/api/matches/:matchId/predict", (req, res) => {
-  const { playerId, sessionToken } = req.body || {};
+// ---- Betting (pari-mutuel points) ----
+
+// Wallet balance for the verified user. POST { sessionToken } -> { balance }
+app.post("/api/wallet", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ verified: false, balance: null });
+  const db = loadDB();
+  const balance = getBalance(db, email);
+  saveDB(db); // persist initialization to 100 on first access
+  res.json({ verified: true, email, balance });
+});
+
+// Place a bet on a match. Body: { outcome: "A"|"B"|"draw", stake: 1..20, sessionToken }
+// One bet per user per match, only while Upcoming. Deducts stake from wallet.
+app.post("/api/matches/:matchId/bet", (req, res) => {
+  const { outcome, stake, sessionToken } = req.body || {};
   const email = auth.verifySession(sessionToken);
   if (!email) {
-    return res
-      .status(401)
-      .json({ error: "Please verify your email before making a prediction." });
+    return res.status(401).json({ error: "Please verify your email before betting." });
   }
-  if (!playerId) {
-    return res.status(400).json({ error: "A prediction is required." });
+  if (!["A", "B", "draw"].includes(outcome)) {
+    return res.status(400).json({ error: "Choose Player A, Player B, or Draw." });
+  }
+  const amt = Math.floor(Number(stake));
+  if (!Number.isFinite(amt) || amt < 1 || amt > MAX_STAKE) {
+    return res.status(400).json({ error: `Stake must be a whole number from 1 to ${MAX_STAKE}.` });
   }
   const db = loadDB();
   const match = db.matches.find((m) => m.id === req.params.matchId);
   if (!match) return res.status(404).json({ error: "Match not found." });
-  const isValidPick =
-    playerId === "draw" ||
-    playerId === match.playerAId ||
-    playerId === match.playerBId;
-  if (!isValidPick) {
-    return res.status(400).json({ error: "Invalid prediction for this match." });
-  }
   if (!predictionsOpen(match)) {
     const s = effectiveStatus(match);
-    const msg =
-      s === "live" ? "This match is live — predictions are now closed."
-      : s === "over" ? "This match is over — predictions are closed."
-      : "Predictions are closed for this match.";
-    return res.status(409).json({ error: msg });
-  }
-
-  const existing = db.predictions.find(
-    (v) => v.matchId === match.id && v.email === email
-  );
-  if (existing) {
-    if (existing.playerId === playerId) {
-      return res.status(409).json({ error: "You already made this prediction." });
-    }
-    existing.playerId = playerId;
-    existing.ts = Date.now();
-  } else {
-    db.predictions.push({
-      id: id(),
-      matchId: match.id,
-      playerId,
-      email,
-      ts: Date.now(),
+    return res.status(409).json({
+      error: s === "live" ? "This match is live — betting is closed."
+        : s === "over" ? "This match is over — betting is closed."
+        : "Betting is closed for this match.",
     });
   }
-  // Auto-opt-in this verified email to match notifications on first prediction.
-  const added = addOptIn(db, email);
+  // One bet per match per user.
+  if (db.bets.find((b) => b.matchId === match.id && b.email === email)) {
+    return res.status(409).json({ error: "You already placed a bet on this match." });
+  }
+  const balance = getBalance(db, email);
+  if (amt > balance) {
+    return res.status(400).json({ error: `Not enough points. Your balance is ${balance}.` });
+  }
+  db.wallets[email] = balance - amt;
+  db.bets.push({
+    id: id(),
+    matchId: match.id,
+    gameId: match.gameId,
+    email,
+    outcome,
+    stake: amt,
+    ts: Date.now(),
+    settled: false,
+    payout: 0,
+  });
+  addOptIn(db, email); // auto opt-in to notifications on first bet
   saveDB(db);
-  broadcast("predictions", { matchId: match.id });
-  res.json({ ok: true, notifyOptedIn: isOptedIn(db, email), autoOptedIn: added });
+  broadcast("bets", { matchId: match.id, gameId: match.gameId });
+  res.status(201).json({ ok: true, balance: db.wallets[email] });
 });
 
-// Return the verified user's own predictions: { matchId: playerId }
-// Lets the UI correctly show "already predicted" even after re-login / incognito.
-app.post("/api/my-predictions", (req, res) => {
+// The verified user's own bets: { matchId: { outcome, stake, settled, payout } }
+app.post("/api/my-bets", (req, res) => {
   const email = auth.verifySession((req.body || {}).sessionToken);
-  if (!email) return res.json({}); // not verified -> no predictions to show
+  if (!email) return res.json({ bets: {}, balance: null });
   const db = loadDB();
-  const mine = {};
-  db.predictions
-    .filter((v) => v.email === email)
-    .forEach((v) => (mine[v.matchId] = v.playerId));
-  res.json(mine);
+  const bets = {};
+  db.bets
+    .filter((b) => b.email === email)
+    .forEach((b) => (bets[b.matchId] = {
+      outcome: b.outcome, stake: b.stake, settled: b.settled, payout: b.payout,
+    }));
+  res.json({ bets, balance: getBalance(db, email) });
 });
 
 // ---- Notification opt-in (email) ----
@@ -435,93 +527,57 @@ app.post("/api/notifications/set", (req, res) => {
   res.json({ ok: true, optedIn: isOptedIn(db, email) });
 });
 
-// Player prediction leaderboard: total predictions received per player.
-// Optional ?gameId=... scopes to matches of one game.
-app.get("/api/leaderboard/predictions", (req, res) => {
-  const db = loadDB();
-  const gameId = req.query.gameId;
-  const matchIds = gameId
-    ? new Set(db.matches.filter((m) => m.gameId === gameId).map((m) => m.id))
-    : null;
-  const preds = matchIds
-    ? db.predictions.filter((v) => matchIds.has(v.matchId))
-    : db.predictions;
-  const counts = {};
-  preds.forEach((v) => {
-    counts[v.playerId] = (counts[v.playerId] || 0) + 1;
-  });
-  const board = db.players
-    .map((p) => ({ ...p, predictions: counts[p.id] || 0 }))
-    .sort((a, b) => b.predictions - a.predictions);
-  res.json(board);
-});
-
-// Predictor accuracy leaderboard: which people predicted the result correctly
-// (predicting "draw" counts as correct when the match is drawn).
-app.get("/api/leaderboard/predictors", (req, res) => {
+// Most-backed players: total points staked on each player across bets.
+// Optional ?gameId=... scopes to one game. A player is "backed" when someone
+// bets on them (outcome A => playerA, B => playerB). Draw stakes are separate.
+app.get("/api/leaderboard/backed", (req, res) => {
   const db = loadDB();
   const gameId = req.query.gameId;
   const scopedMatches = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
-  const decided = {}; // matchId -> result ("draw" | playerId), only decided matches
-  scopedMatches.forEach((m) => {
-    const r = matchResult(m);
-    if (r) decided[m.id] = r;
+  const matchById = {};
+  scopedMatches.forEach((m) => (matchById[m.id] = m));
+  const staked = {}; // playerId -> points staked on them
+  let drawStake = 0;
+  db.bets.forEach((b) => {
+    const m = matchById[b.matchId];
+    if (!m) return;
+    if (b.outcome === "A") staked[m.playerAId] = (staked[m.playerAId] || 0) + b.stake;
+    else if (b.outcome === "B") staked[m.playerBId] = (staked[m.playerBId] || 0) + b.stake;
+    else drawStake += b.stake;
   });
+  const board = db.players
+    .map((p) => ({ ...p, staked: staked[p.id] || 0 }))
+    .filter((p) => p.staked > 0)
+    .sort((a, b) => b.staked - a.staked);
+  res.json({ players: board, drawStake });
+});
 
-  const byEmail = {}; // email -> { correct, total }
-  db.predictions.forEach((v) => {
-    if (!(v.matchId in decided)) return; // only score decided matches
-    const e = v.email;
-    byEmail[e] = byEmail[e] || { correct: 0, total: 0 };
-    byEmail[e].total += 1;
-    if (decided[v.matchId] === v.playerId) byEmail[e].correct += 1; // exact match incl. "draw"
+// Top bettors by net winnings (payouts received minus stakes wagered) on
+// SETTLED bets, plus current balance. Optional ?gameId=... scopes to one game.
+app.get("/api/leaderboard/bettors", (req, res) => {
+  const db = loadDB();
+  const gameId = req.query.gameId;
+  const inScope = (b) => !gameId || b.gameId === gameId;
+  const byEmail = {}; // email -> { staked, won, netProfit }
+  db.bets.filter(inScope).forEach((b) => {
+    const e = b.email;
+    byEmail[e] = byEmail[e] || { staked: 0, won: 0 };
+    if (b.settled) {
+      byEmail[e].staked += b.stake;
+      byEmail[e].won += b.payout || 0;
+    }
   });
-
   const board = Object.entries(byEmail)
     .map(([email, s]) => ({
       email,
       name: nameFromEmail(email),
-      correct: s.correct,
-      total: s.total,
-      accuracy: s.total ? Math.round((s.correct / s.total) * 100) : 0,
+      net: s.won - s.staked,
+      won: s.won,
+      staked: s.staked,
+      balance: getBalance(db, email),
     }))
-    .sort((a, b) => b.correct - a.correct || b.accuracy - a.accuracy);
-  res.json(board);
-});
-
-// Player standings (chess points): win = 1.0, draw = 0.5 each.
-// Optional ?gameId=... scopes to one game.
-app.get("/api/leaderboard/winners", (req, res) => {
-  const db = loadDB();
-  const gameId = req.query.gameId;
-  const scopedMatches = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
-  const stats = {}; // playerId -> { wins, draws, points }
-  function ensure(pid) {
-    stats[pid] = stats[pid] || { wins: 0, draws: 0, points: 0 };
-    return stats[pid];
-  }
-  scopedMatches.forEach((m) => {
-    const r = matchResult(m);
-    if (!r) return;
-    if (r === "draw") {
-      ensure(m.playerAId).draws += 1;
-      ensure(m.playerAId).points += 0.5;
-      ensure(m.playerBId).draws += 1;
-      ensure(m.playerBId).points += 0.5;
-    } else {
-      ensure(r).wins += 1;
-      ensure(r).points += 1;
-    }
-  });
-  const board = db.players
-    .map((p) => ({
-      ...p,
-      wins: stats[p.id] ? stats[p.id].wins : 0,
-      draws: stats[p.id] ? stats[p.id].draws : 0,
-      points: stats[p.id] ? stats[p.id].points : 0,
-    }))
-    .filter((p) => p.points > 0)
-    .sort((a, b) => b.points - a.points || b.wins - a.wins);
+    .filter((x) => x.staked > 0)
+    .sort((a, b) => b.net - a.net || b.balance - a.balance);
   res.json(board);
 });
 
@@ -903,15 +959,27 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, (req, res) => {
       .json({ error: "Result must be one of the two players or a draw." });
   }
 
+  // If this match was already settled, reverse the old payouts before applying
+  // a new result (handles changing or clearing the result).
+  if (isDecided(match)) {
+    unsettleMatch(db, match);
+  }
+
   match.result = val; // "draw" | playerId | null
   match.winnerId = val && val !== "draw" ? val : null; // keep legacy field in sync
   // Setting a result finishes the match; clearing it reverts to upcoming.
   if (val) match.status = "finished";
   else if (match.status === "finished") match.status = "upcoming";
+
+  // Settle bets (pari-mutuel payout) when a result is set.
+  let settlement = null;
+  if (val) settlement = settleMatch(db, match);
+
   saveDB(db);
   broadcast("winner", { matchId: match.id, result: match.result });
+  broadcast("bets", { matchId: match.id, gameId: match.gameId });
   broadcast("matches", { id: match.id });
-  res.json({ ok: true, match });
+  res.json({ ok: true, match, settlement });
 });
 
 // Set the live/upcoming status of a match (does not affect the result).

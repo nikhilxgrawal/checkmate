@@ -57,17 +57,6 @@ function isVerified() {
   return !!getSession().token;
 }
 
-// Remember which player the user predicted per match (for UI highlight)
-function myPredictions() {
-  try { return JSON.parse(localStorage.getItem("cm_pred") || "{}"); }
-  catch { return {}; }
-}
-function setMyPrediction(matchId, playerId) {
-  const s = myPredictions();
-  s[matchId] = playerId;
-  localStorage.setItem("cm_pred", JSON.stringify(s));
-}
-
 // ---------- Realtime (SSE) ----------
 let _es = null;
 function connectRealtime(handlers) {
@@ -164,7 +153,10 @@ function signOutVoter() {
   toast("Signed out", "ok");
 }
 
-// ---------- Public: matches + predictions ----------
+// ---------- Public: matches + betting ----------
+let MY_BETS = {};      // matchId -> { outcome, stake, settled, payout }
+let MY_BALANCE = null; // current wallet balance (null if unverified)
+
 async function renderMatches(gameId) {
   renderVerifyBar();
   const containers = {
@@ -172,111 +164,111 @@ async function renderMatches(gameId) {
     upcoming: document.getElementById("upcomingMatches"),
     finished: document.getElementById("completedMatches"),
   };
-  // Fallback: legacy single container
   const legacy = document.getElementById("matches");
   if (!containers.live && !containers.upcoming && !legacy) return;
   try {
     const matchesUrl = gameId ? `/api/matches?gameId=${encodeURIComponent(gameId)}` : "/api/matches";
-    const [matches, serverMine] = await Promise.all([
+    const [matches, mineRes] = await Promise.all([
       api(matchesUrl),
       isVerified()
-        ? api("/api/my-predictions", {
+        ? api("/api/my-bets", {
             method: "POST",
             body: JSON.stringify({ sessionToken: getSession().token }),
-          }).catch(() => ({}))
-        : Promise.resolve({}),
+          }).catch(() => ({ bets: {}, balance: null }))
+        : Promise.resolve({ bets: {}, balance: null }),
     ]);
-    const mine = { ...myPredictions(), ...serverMine };
-    localStorage.setItem("cm_pred", JSON.stringify(mine));
+    MY_BETS = mineRes.bets || {};
+    MY_BALANCE = mineRes.balance;
+    renderWalletBar();
 
-    // Legacy single-list mode (if the page hasn't been split)
     if (legacy && !containers.live) {
       legacy.innerHTML = matches.length
-        ? matches.map((m) => matchCardHTML(m, mine[m.id])).join("")
-        : '<div class="empty">No matches scheduled yet. Check back soon.</div>';
+        ? matches.map((m) => matchCardHTML(m)).join("")
+        : '<div class="empty">No matches scheduled yet.</div>';
       return;
     }
 
     const groups = { live: [], upcoming: [], finished: [] };
     matches.forEach((m) => {
       let s;
-      if (m.status === "finished" || m.status === "over") s = "finished"; // both are "match ended"
+      if (m.status === "finished" || m.status === "over") s = "finished";
       else if (m.status === "live") s = "live";
       else s = "upcoming";
       groups[s].push(m);
     });
-
-    setSection(
-      "live",
-      containers.live,
-      groups.live,
-      mine,
-      "No matches are live right now."
-    );
-    setSection(
-      "upcoming",
-      containers.upcoming,
-      groups.upcoming,
-      mine,
-      "No upcoming matches. Check back soon."
-    );
-    setSection(
-      "finished",
-      containers.finished,
-      groups.finished,
-      mine,
-      "No completed matches yet."
-    );
+    setSection("live", containers.live, groups.live, "No matches are live right now.");
+    setSection("upcoming", containers.upcoming, groups.upcoming, "No upcoming matches. Check back soon.");
+    setSection("finished", containers.finished, groups.finished, "No completed matches yet.");
   } catch (e) {
     if (containers.live) containers.live.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     else if (legacy) legacy.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   }
 }
 
-function setSection(key, container, list, mine, emptyMsg) {
+function renderWalletBar() {
+  const el = document.getElementById("walletBar");
+  if (!el) return;
+  if (!isVerified()) { el.style.display = "none"; return; }
+  el.style.display = "";
+  el.innerHTML = `💰 Your balance: <strong>${MY_BALANCE == null ? "…" : MY_BALANCE}</strong> points`;
+}
+
+function setSection(key, container, list, emptyMsg) {
   if (!container) return;
   container.innerHTML = list.length
-    ? list.map((m) => matchCardHTML(m, mine[m.id])).join("")
+    ? list.map((m) => matchCardHTML(m)).join("")
     : `<div class="empty">${emptyMsg}</div>`;
-  // Hide the whole section wrapper (title + grid) for the finished group when empty
   const section = document.getElementById("section-" + key);
   if (section) section.style.display = list.length || key !== "finished" ? "" : "none";
 }
 
-function matchCardHTML(m, minePid) {
-  const total = m.votesA + m.votesB + (m.votesDraw || 0);
-  const pctA = total ? Math.round((m.votesA / total) * 100) : 34;
-  const pctD = total ? Math.round(((m.votesDraw || 0) / total) * 100) : 33;
-  const pctB = 100 - pctA - pctD;
-  // Predictions are open ONLY while the match is Upcoming.
-  const predOpen = m.status === "upcoming";
-  const closed = !predOpen;
+function oddsLabel(o) { return o ? `${o.toFixed(2)}×` : "—"; }
+
+// Build one betting outcome row.
+function outcomeRow(m, key, label, stakeOnThis, odds, betOpen, myBet, isWinnerOutcome) {
+  const mineHere = myBet && myBet.outcome === key;
+  const cls = ["bet-opt"];
+  if (mineHere) cls.push("mine");
+  if (isWinnerOutcome) cls.push("won");
+  const click = betOpen && !myBet ? `onclick="openBet('${m.id}','${key}','${esc(label).replace(/'/g,"")}')"` : "";
+  const right = isWinnerOutcome
+    ? `<span class="bet-tag won-tag">WON</span>`
+    : mineHere
+    ? `<span class="bet-tag mine-tag">Your bet · ${myBet.stake}${myBet.settled ? ` → +${myBet.payout}` : ""}</span>`
+    : betOpen && !myBet
+    ? `<span class="bet-tag">Bet</span>`
+    : "";
+  return `
+    <div class="${cls.join(" ")}" ${click} ${click ? "" : 'style="cursor:default"'}>
+      <div class="bet-label">${label}</div>
+      <div class="bet-figs">
+        <span class="bet-odds">${oddsLabel(odds)}</span>
+        <span class="bet-pool">${stakeOnThis} pts</span>
+      </div>
+      ${right}
+    </div>`;
+}
+
+function matchCardHTML(m) {
+  const betOpen = m.status === "upcoming";
   const isLive = m.status === "live";
   const isOver = m.status === "over";
   const statusBadge = isLive ? `<span class="chip live-chip">🔴 LIVE</span>`
-    : isOver ? `<span class="chip over-chip">🏁 GAME OVER</span>`
-    : "";
+    : isOver ? `<span class="chip over-chip">🏁 GAME OVER</span>` : "";
   const resultBadge = m.isDraw
     ? `<span class="chip win" style="background:#8a8f98;color:#0a0a0a">🤝 Draw · ½–½</span>`
-    : m.winner
-    ? `<span class="chip win">🏆 Winner: ${esc(m.winner.name)}</span>`
-    : "";
-  const drawMine = minePid === "draw";
-  const drawCls = ["draw-pick"];
-  if (drawMine) drawCls.push("supported");
-  if (m.isDraw) drawCls.push("winner");
-  const drawRow = `
-    <div class="${drawCls.join(" ")}" ${predOpen ? `onclick="predict('${m.id}','draw')"` : 'style="cursor:default"'}>
-      <span class="draw-label">🤝 Draw</span>
-      <span class="draw-votes">${m.votesDraw || 0} prediction${(m.votesDraw || 0) === 1 ? "" : "s"}</span>
-      ${m.isDraw ? '<span class="draw-tag win-tag">RESULT</span>'
-        : !predOpen ? (drawMine ? '<span class="draw-tag">You predicted</span>' : "")
-        : `<span class="draw-tag ${drawMine ? "on" : ""}">${drawMine ? "✓ Predicted" : "Predict Draw"}</span>`}
-    </div>`;
-  const hint = predOpen ? "Predict the winner — or a draw"
-    : isLive ? "🔴 Match is live — predictions closed"
+    : m.winner ? `<span class="chip win">🏆 ${esc(m.winner.name)}</span>` : "";
+  const myBet = MY_BETS[m.id];
+  const total = m.poolTotal || 0;
+  const pctA = total ? Math.round((m.pool.A / total) * 100) : 34;
+  const pctD = total ? Math.round((m.pool.draw / total) * 100) : 33;
+  const pctB = 100 - pctA - pctD;
+  const wo = m.result ? (m.isDraw ? "draw" : (m.winner && m.winner.id === m.playerAId ? "A" : "B")) : null;
+  const hint = betOpen
+    ? (myBet ? `You bet ${myBet.stake} pts on ${myBet.outcome === "draw" ? "Draw" : myBet.outcome === "A" ? esc(m.playerA.name) : esc(m.playerB.name)}` : "Place your bet (1–20 pts)")
+    : isLive ? "🔴 Live — betting closed"
     : isOver ? "🏁 Game over — awaiting result"
-    : "Predictions closed";
+    : "Betting closed";
   return `
   <div class="match-card ${isLive ? "is-live" : ""} ${isOver ? "is-over" : ""}">
     <div class="match-meta">
@@ -286,66 +278,51 @@ function matchCardHTML(m, minePid) {
       ${m.location ? `<span class="chip ghost">📍 ${esc(m.location)}</span>` : ""}
       ${resultBadge}
     </div>
-    <div class="versus">
-      ${playerCell(m, m.playerA, m.votesA, minePid, predOpen)}
-      <div class="vs">VS</div>
-      ${playerCell(m, m.playerB, m.votesB, minePid, predOpen)}
+    <div class="matchup">
+      <strong>${esc(m.playerA ? m.playerA.name : "?")}</strong>
+      <span class="vs-sm">vs</span>
+      <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong>
+    </div>
+    <div class="pool-line">Pool: <strong>${total}</strong> pts · ${m.betCount} bet${m.betCount === 1 ? "" : "s"}</div>
+    <div class="bet-opts">
+      ${outcomeRow(m, "A", m.playerA ? m.playerA.name : "Player A", m.pool.A, m.odds.A, betOpen, myBet, wo === "A")}
+      ${outcomeRow(m, "draw", "🤝 Draw", m.pool.draw, m.odds.draw, betOpen, myBet, wo === "draw")}
+      ${outcomeRow(m, "B", m.playerB ? m.playerB.name : "Player B", m.pool.B, m.odds.B, betOpen, myBet, wo === "B")}
     </div>
     <div class="votebar">
       <div class="a" style="width:${pctA}%"></div>
       <div class="d" style="width:${pctD}%"></div>
       <div class="b" style="width:${pctB}%"></div>
     </div>
-    ${drawRow}
     <div class="predict-hint">${hint}</div>
   </div>`;
 }
 
-function playerCell(match, player, votes, minePid, predOpen) {
-  if (!player) return "<div></div>";
-  const isMine = minePid === player.id;
-  const isWinner = match.winner && match.winner.id === player.id;
-  const cls = ["player"];
-  if (isMine) cls.push("supported");
-  if (isWinner) cls.push("winner");
-  const clickable = predOpen ? `onclick="predict('${match.id}','${player.id}')"` : "";
-  return `
-    <div class="${cls.join(" ")}" ${clickable} ${predOpen ? "" : 'style="cursor:default"'}>
-      <div class="pname">${esc(player.name)}</div>
-      <div class="porg">${esc(player.org || "")}</div>
-      <div class="pvotes">${votes} prediction${votes === 1 ? "" : "s"}</div>
-      ${isWinner ? '<div class="crown">👑 WINNER</div>'
-        : !predOpen ? `<div class="crown" style="color:var(--muted)">${isMine ? "✓ You predicted" : ""}</div>`
-        : `<button class="support-btn">${isMine ? "✓ Predicted" : "Predict"}</button>`}
-    </div>`;
-}
-
-async function predict(matchId, playerId) {
-  if (!isVerified()) {
-    openVerify();
-    toast("Verify your Snapdeal email to predict.", "err");
+// Open the bet stake prompt for a chosen outcome.
+function openBet(matchId, outcome, label) {
+  if (!isVerified()) { openVerify(); toast("Verify your Snapdeal email to bet.", "err"); return; }
+  const raw = prompt(`Bet on ${label}\nYour balance: ${MY_BALANCE} pts\nEnter stake (1–20):`, "10");
+  if (raw === null) return;
+  const stake = Math.floor(Number(raw));
+  if (!Number.isFinite(stake) || stake < 1 || stake > 20) {
+    toast("Stake must be a whole number from 1 to 20.", "err");
     return;
   }
+  placeBet(matchId, outcome, stake);
+}
+
+async function placeBet(matchId, outcome, stake) {
   try {
-    const r = await api(`/api/matches/${matchId}/predict`, {
+    const r = await api(`/api/matches/${matchId}/bet`, {
       method: "POST",
-      body: JSON.stringify({ playerId, sessionToken: getSession().token }),
+      body: JSON.stringify({ outcome, stake, sessionToken: getSession().token }),
     });
-    setMyPrediction(matchId, playerId);
-    toast(r && r.autoOptedIn
-      ? "Prediction counted! You'll now get an email when matches go live."
-      : "Your prediction is counted!", "ok");
+    MY_BALANCE = r.balance;
+    toast(`Bet placed: ${stake} pts. Balance: ${r.balance}`, "ok");
     renderMatches(CURRENT_GAME_ID);
-    renderNotifyBar(); // auto-opt-in may have turned notifications on
+    renderNotifyBar();
   } catch (e) {
     if (/verify your email/i.test(e.message)) { clearSession(); openVerify(); }
-    if (/already predicted/i.test(e.message)) {
-      setMyPrediction(matchId, playerId);
-      toast("You've already made your prediction for this match.", "err");
-      renderMatches(CURRENT_GAME_ID);
-      return;
-    }
-    // On any other failure, resync UI with server truth.
     renderMatches(CURRENT_GAME_ID);
     toast(e.message, "err");
   }
@@ -355,31 +332,37 @@ async function predict(matchId, playerId) {
 async function renderLeaderboards(gameId) {
   const q = gameId ? `?gameId=${encodeURIComponent(gameId)}` : "";
   try {
-    const [winners, predictions, predictors] = await Promise.all([
-      api("/api/leaderboard/winners" + q),
-      api("/api/leaderboard/predictions" + q),
-      api("/api/leaderboard/predictors" + q),
+    const [bettors, backed] = await Promise.all([
+      api("/api/leaderboard/bettors" + q),
+      api("/api/leaderboard/backed" + q),
     ]);
 
+    // Top bettors by net winnings (settled bets)
     const wEl = document.getElementById("winners");
-    if (wEl) wEl.innerHTML = winners.length
-      ? winners.map((p, i) => {
-          const sub = `${p.wins} win${p.wins === 1 ? "" : "s"}` +
-            (p.draws ? ` · ${p.draws} draw${p.draws === 1 ? "" : "s"}` : "");
-          const pts = Number.isInteger(p.points) ? p.points : p.points.toFixed(1);
-          return boardRow(i, p.name, sub, pts, "win", "pt" + (p.points === 1 ? "" : "s"));
+    if (wEl) wEl.innerHTML = bettors.length
+      ? bettors.map((p, i) => {
+          const sub = `${p.balance} pts balance · staked ${p.staked}, won ${p.won}`;
+          const net = (p.net > 0 ? "+" : "") + p.net;
+          return boardRow(i, p.name, sub, net, p.net >= 0 ? "win" : "", "net pts");
         }).join("")
-      : '<div class="empty">No results recorded yet.</div>';
+      : '<div class="empty">No settled bets yet. Winnings show once matches have results.</div>';
 
+    // Most-backed players (by points staked)
     const pEl = document.getElementById("predictions");
-    if (pEl) pEl.innerHTML = predictions.length && predictions.some(p => p.predictions > 0)
-      ? predictions.filter(p => p.predictions > 0).map((p, i) => boardRow(i, p.name, p.org, p.predictions, "", "prediction" + (p.predictions === 1 ? "" : "s"))).join("")
-      : '<div class="empty">No predictions yet.</div>';
+    if (pEl) {
+      const players = (backed.players || []);
+      let html = players.length
+        ? players.map((p, i) => boardRow(i, p.name, p.org, p.staked, "", "pts backed")).join("")
+        : "";
+      if (backed.drawStake) {
+        html += boardRow(players.length, "🤝 Draw", "points on a draw", backed.drawStake, "", "pts backed");
+      }
+      pEl.innerHTML = html || '<div class="empty">No bets placed yet.</div>';
+    }
 
+    // Third board (predictors) not used in betting mode — hide if present.
     const prEl = document.getElementById("predictors");
-    if (prEl) prEl.innerHTML = predictors.length
-      ? predictors.map((p, i) => boardRow(i, p.name, `${p.correct}/${p.total} correct`, p.accuracy + "%", "win", "accuracy")).join("")
-      : '<div class="empty">No settled predictions yet. Accuracy appears once matches have winners.</div>';
+    if (prEl) prEl.innerHTML = '<div class="empty">Place bets on upcoming matches to climb the winnings board!</div>';
   } catch (e) {
     toast(e.message, "err");
   }
@@ -622,7 +605,7 @@ function initHome() {
     games: () => { renderGamesGrid(); renderStats(); },
     matches: () => { renderGamesGrid(); renderStats(); },
     winner: () => { renderGamesGrid(); renderStats(); },
-    predictions: () => renderStats(),
+    bets: () => renderStats(),
   });
 }
 
@@ -669,7 +652,7 @@ function initGame() {
   renderNotifyBar();
   renderMatches(CURRENT_GAME_ID);
   connectRealtime({
-    predictions: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
+    bets: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
     matches: () => renderMatches(CURRENT_GAME_ID),
     winner: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
     chat: (e) => { if (isTabVisible("chat")) renderChat(true); },
@@ -847,6 +830,7 @@ function showPanel() {
     matches: () => loadAdminData(),
     games: () => loadAdminData(),
     predictions: () => {},
+    bets: () => {},
   });
 }
 
