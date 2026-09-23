@@ -22,14 +22,36 @@ function loadDB() {
     const raw = fs.readFileSync(DATA_FILE, "utf8");
     const db = JSON.parse(raw);
     // ensure new collections exist for backward compatibility
+    db.games = db.games || [];
     db.players = db.players || [];
     db.matches = db.matches || [];
     db.predictions = db.predictions || db.votes || []; // migrate old "votes"
     db.posts = db.posts || [];
+    db.chat = db.chat || [];
+    db.notifyOptIns = db.notifyOptIns || [];
     delete db.votes;
+
+    // ---- Migration: if there are matches but no games, create a default
+    // "Chess" game and assign all existing matches + chat to it. ----
+    if (db.games.length === 0 && db.matches.length > 0) {
+      const chess = {
+        id: id(),
+        name: "Chess",
+        emoji: "\u265F\uFE0F",
+        description: "The Acevector Chess Tournament",
+        ts: Date.now(),
+      };
+      db.games.push(chess);
+      db.matches.forEach((m) => { if (!m.gameId) m.gameId = chess.id; });
+      db.chat.forEach((c) => { if (!c.gameId) c.gameId = chess.id; });
+      saveDB(db);
+    }
     return db;
   } catch (e) {
-    return { players: [], matches: [], predictions: [], posts: [] };
+    return {
+      games: [], players: [], matches: [], predictions: [],
+      posts: [], chat: [], notifyOptIns: [],
+    };
   }
 }
 
@@ -45,7 +67,14 @@ function id() {
 // Seed with the tournament invite data if empty
 function seedIfEmpty() {
   const db = loadDB();
-  if (db.players.length === 0 && db.matches.length === 0) {
+  if (db.games.length === 0 && db.matches.length === 0) {
+    const chess = {
+      id: id(),
+      name: "Chess",
+      emoji: "\u265F\uFE0F",
+      description: "The Acevector Chess Tournament",
+      ts: Date.now(),
+    };
     const players = [
       { id: id(), name: "Sandeep Singh Sachdeva", org: "Snapdeal" },
       { id: id(), name: "Rishi Sharma", org: "Unicommerce" },
@@ -55,6 +84,7 @@ function seedIfEmpty() {
     const matches = [
       {
         id: id(),
+        gameId: chess.id,
         playerAId: players[0].id,
         playerBId: players[1].id,
         time: "1:30 PM - 2:00 PM",
@@ -66,6 +96,7 @@ function seedIfEmpty() {
       },
       {
         id: id(),
+        gameId: chess.id,
         playerAId: players[2].id,
         playerBId: players[3].id,
         time: "4:30 PM - 5:00 PM",
@@ -76,7 +107,10 @@ function seedIfEmpty() {
         winnerId: null,
       },
     ];
-    saveDB({ players, matches, predictions: [], posts: [] });
+    saveDB({
+      games: [chess], players, matches,
+      predictions: [], posts: [], chat: [], notifyOptIns: [],
+    });
   }
 }
 seedIfEmpty();
@@ -128,6 +162,47 @@ function playerMap(db) {
   return m;
 }
 
+// ---- Notification opt-in helpers (server-side list keyed by verified email) ----
+function isOptedIn(db, email) {
+  return db.notifyOptIns.includes(email);
+}
+// Add an email to the opt-in list (idempotent). Returns true if it was added.
+function addOptIn(db, email) {
+  if (!email || db.notifyOptIns.includes(email)) return false;
+  db.notifyOptIns.push(email);
+  return true;
+}
+function removeOptIn(db, email) {
+  const before = db.notifyOptIns.length;
+  db.notifyOptIns = db.notifyOptIns.filter((e) => e !== email);
+  return db.notifyOptIns.length !== before;
+}
+
+// Email all opted-in users that a match just went live. Fire-and-forget with a
+// small concurrency limit to respect SES send rate. Never blocks the response.
+async function notifyMatchLive(db, match, baseUrl) {
+  const pm = playerMap(db);
+  const a = pm[match.playerAId] ? pm[match.playerAId].name : "Player A";
+  const b = pm[match.playerBId] ? pm[match.playerBId].name : "Player B";
+  const line = `${a} vs ${b}`;
+  const url = (baseUrl || process.env.PUBLIC_URL || "").replace(/\/$/, "") || undefined;
+  const recipients = [...db.notifyOptIns];
+  if (recipients.length === 0) return { sent: 0 };
+
+  const CONCURRENCY = 3;
+  let i = 0, sent = 0, failed = 0;
+  async function worker() {
+    while (i < recipients.length) {
+      const to = recipients[i++];
+      const r = await auth.sendMatchLiveEmail(to, { title: line, line, url });
+      if (r.ok) sent++; else failed++;
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  console.log(`[notify] match ${match.id} live: emailed ${sent}/${recipients.length} (failed ${failed})`);
+  return { sent, failed, total: recipients.length };
+}
+
 // display name from email: "nikhil.agrawal@snapdeal.com" -> "Nikhil Agrawal"
 function nameFromEmail(email) {
   const local = String(email || "").split("@")[0];
@@ -144,6 +219,53 @@ app.get("/api/players", (req, res) => {
   res.json(loadDB().players);
 });
 
+// ---- Games ----
+function gameSummary(db, g) {
+  const gameMatches = db.matches.filter((m) => m.gameId === g.id);
+  const live = gameMatches.filter((m) => effectiveStatus(m) === "live").length;
+  const upcoming = gameMatches.filter((m) => effectiveStatus(m) === "upcoming").length;
+  const completed = gameMatches.filter(
+    (m) => effectiveStatus(m) === "finished" || effectiveStatus(m) === "over"
+  ).length;
+  return {
+    ...g,
+    matchCount: gameMatches.length,
+    liveCount: live,
+    upcomingCount: upcoming,
+    completedCount: completed,
+  };
+}
+
+// List all games with counts (for the home page grid + live-now strip).
+app.get("/api/games", (req, res) => {
+  const db = loadDB();
+  const games = db.games
+    .map((g) => gameSummary(db, g))
+    .sort((a, b) => b.liveCount - a.liveCount || (a.ts || 0) - (b.ts || 0));
+  res.json(games);
+});
+
+// Single game details.
+app.get("/api/games/:gameId", (req, res) => {
+  const db = loadDB();
+  const g = db.games.find((x) => x.id === req.params.gameId);
+  if (!g) return res.status(404).json({ error: "Game not found." });
+  res.json(gameSummary(db, g));
+});
+
+// Platform-wide stats for the home page bar.
+app.get("/api/stats", (req, res) => {
+  const db = loadDB();
+  const liveMatches = db.matches.filter((m) => effectiveStatus(m) === "live").length;
+  res.json({
+    games: db.games.length,
+    matches: db.matches.length,
+    liveMatches,
+    predictions: db.predictions.length,
+    players: db.players.length,
+  });
+});
+
 // A match is "decided" when the admin has set a result: a player win or a draw.
 // We keep legacy winnerId in sync (winnerId = playerId on a player win, null otherwise).
 function matchResult(match) {
@@ -157,17 +279,27 @@ function isDecided(match) {
 }
 
 // Effective status: "finished" if a result is set; otherwise the admin-set
-// status ("live" or "upcoming"), defaulting to "upcoming".
+// status: "live", "over" (game over, awaiting result), or "upcoming" (default).
 function effectiveStatus(match) {
   if (isDecided(match)) return "finished";
-  return match.status === "live" ? "live" : "upcoming";
+  if (match.status === "live") return "live";
+  if (match.status === "over") return "over";
+  return "upcoming";
 }
 
-// List matches enriched with prediction counts + result
+// Predictions are allowed ONLY while the match is Upcoming (before it starts).
+function predictionsOpen(match) {
+  return effectiveStatus(match) === "upcoming";
+}
+
+// List matches enriched with prediction counts + result.
+// Optional ?gameId=... filters to a single game.
 app.get("/api/matches", (req, res) => {
   const db = loadDB();
   const pm = playerMap(db);
-  const matches = db.matches.map((match) => {
+  const gameId = req.query.gameId;
+  const source = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
+  const matches = source.map((match) => {
     const votesA = db.predictions.filter(
       (v) => v.matchId === match.id && v.playerId === match.playerAId
     ).length;
@@ -233,8 +365,13 @@ app.post("/api/matches/:matchId/predict", (req, res) => {
   if (!isValidPick) {
     return res.status(400).json({ error: "Invalid prediction for this match." });
   }
-  if (isDecided(match)) {
-    return res.status(409).json({ error: "This match is over — predictions are closed." });
+  if (!predictionsOpen(match)) {
+    const s = effectiveStatus(match);
+    const msg =
+      s === "live" ? "This match is live — predictions are now closed."
+      : s === "over" ? "This match is over — predictions are closed."
+      : "Predictions are closed for this match.";
+    return res.status(409).json({ error: msg });
   }
 
   const existing = db.predictions.find(
@@ -255,9 +392,11 @@ app.post("/api/matches/:matchId/predict", (req, res) => {
       ts: Date.now(),
     });
   }
+  // Auto-opt-in this verified email to match notifications on first prediction.
+  const added = addOptIn(db, email);
   saveDB(db);
   broadcast("predictions", { matchId: match.id });
-  res.json({ ok: true });
+  res.json({ ok: true, notifyOptedIn: isOptedIn(db, email), autoOptedIn: added });
 });
 
 // Return the verified user's own predictions: { matchId: playerId }
@@ -273,11 +412,42 @@ app.post("/api/my-predictions", (req, res) => {
   res.json(mine);
 });
 
-// Player prediction leaderboard: total predictions received per player
+// ---- Notification opt-in (email) ----
+// Get the requester's current opt-in status.
+app.post("/api/notifications/status", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ verified: false, optedIn: false });
+  const db = loadDB();
+  res.json({ verified: true, email, optedIn: isOptedIn(db, email) });
+});
+
+// Set the requester's opt-in status. Body: { sessionToken, optIn: boolean }
+app.post("/api/notifications/set", (req, res) => {
+  const { sessionToken, optIn } = req.body || {};
+  const email = auth.verifySession(sessionToken);
+  if (!email) {
+    return res.status(401).json({ error: "Please verify your email to change notifications." });
+  }
+  const db = loadDB();
+  if (optIn) addOptIn(db, email);
+  else removeOptIn(db, email);
+  saveDB(db);
+  res.json({ ok: true, optedIn: isOptedIn(db, email) });
+});
+
+// Player prediction leaderboard: total predictions received per player.
+// Optional ?gameId=... scopes to matches of one game.
 app.get("/api/leaderboard/predictions", (req, res) => {
   const db = loadDB();
+  const gameId = req.query.gameId;
+  const matchIds = gameId
+    ? new Set(db.matches.filter((m) => m.gameId === gameId).map((m) => m.id))
+    : null;
+  const preds = matchIds
+    ? db.predictions.filter((v) => matchIds.has(v.matchId))
+    : db.predictions;
   const counts = {};
-  db.predictions.forEach((v) => {
+  preds.forEach((v) => {
     counts[v.playerId] = (counts[v.playerId] || 0) + 1;
   });
   const board = db.players
@@ -290,8 +460,10 @@ app.get("/api/leaderboard/predictions", (req, res) => {
 // (predicting "draw" counts as correct when the match is drawn).
 app.get("/api/leaderboard/predictors", (req, res) => {
   const db = loadDB();
+  const gameId = req.query.gameId;
+  const scopedMatches = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
   const decided = {}; // matchId -> result ("draw" | playerId), only decided matches
-  db.matches.forEach((m) => {
+  scopedMatches.forEach((m) => {
     const r = matchResult(m);
     if (r) decided[m.id] = r;
   });
@@ -318,14 +490,17 @@ app.get("/api/leaderboard/predictors", (req, res) => {
 });
 
 // Player standings (chess points): win = 1.0, draw = 0.5 each.
+// Optional ?gameId=... scopes to one game.
 app.get("/api/leaderboard/winners", (req, res) => {
   const db = loadDB();
+  const gameId = req.query.gameId;
+  const scopedMatches = gameId ? db.matches.filter((m) => m.gameId === gameId) : db.matches;
   const stats = {}; // playerId -> { wins, draws, points }
   function ensure(pid) {
     stats[pid] = stats[pid] || { wins: 0, draws: 0, points: 0 };
     return stats[pid];
   }
-  db.matches.forEach((m) => {
+  scopedMatches.forEach((m) => {
     const r = matchResult(m);
     if (!r) return;
     if (r === "draw") {
@@ -376,6 +551,18 @@ app.get("/api/posts", (req, res) => {
     .slice(0, 200)
     .map(publicPost);
   res.json(posts);
+});
+
+// Which approved posts belong to the requester (so the author sees a delete
+// button on their own posts, including anonymous ones). Returns { ids: [...] }.
+app.post("/api/posts/mine", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ ids: [] });
+  const db = loadDB();
+  const ids = db.posts
+    .filter((p) => isApproved(p) && p.email === email)
+    .map((p) => p.id);
+  res.json({ ids });
 });
 
 app.post("/api/posts", (req, res) => {
@@ -457,11 +644,171 @@ app.delete("/api/admin/posts/:postId", requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// Delete a post: allowed if the requester is the author (session token matching
+// the post's email) OR an admin (x-admin-key header). Works for anonymous posts too.
+app.delete("/api/posts/:postId", (req, res) => {
+  const db = loadDB();
+  const post = db.posts.find((p) => p.id === req.params.postId);
+  if (!post) return res.status(404).json({ error: "Post not found." });
+
+  const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
+  const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
+  const isOwner = requesterEmail && requesterEmail === post.email;
+
+  if (!isAdmin && !isOwner) {
+    return res.status(403).json({ error: "You can only delete your own posts." });
+  }
+  db.posts = db.posts.filter((p) => p.id !== req.params.postId);
+  saveDB(db);
+  broadcast("posts", { deleted: req.params.postId });
+  broadcast("moderation", { deleted: req.params.postId });
+  res.json({ ok: true });
+});
+
+// ---------- Per-game chat (live, non-anonymous, verified users only) ----------
+const CHAT_LIMIT = 200;
+
+function publicChatMsg(m) {
+  // Never expose the raw email to clients; show the display name only.
+  return { id: m.id, text: m.text, author: m.author, ts: m.ts };
+}
+
+// Last 200 messages for a game, oldest first (chat order). Requires ?gameId=...
+app.get("/api/chat", (req, res) => {
+  const db = loadDB();
+  const gameId = req.query.gameId;
+  const msgs = [...db.chat]
+    .filter((m) => !gameId || m.gameId === gameId)
+    .sort((a, b) => a.ts - b.ts)
+    .slice(-CHAT_LIMIT)
+    .map(publicChatMsg);
+  res.json(msgs);
+});
+
+// Send a message to a game's chat. Requires a verified email + gameId.
+app.post("/api/chat", (req, res) => {
+  const { text, sessionToken, gameId } = req.body || {};
+  const email = auth.verifySession(sessionToken);
+  if (!email) {
+    return res.status(401).json({ error: "Please verify your email before chatting." });
+  }
+  if (!gameId) return res.status(400).json({ error: "gameId is required." });
+  const db = loadDB();
+  if (!db.games.find((g) => g.id === gameId)) {
+    return res.status(404).json({ error: "Game not found." });
+  }
+  const body = String(text || "").trim();
+  if (!body) return res.status(400).json({ error: "Message cannot be empty." });
+  if (body.length > 500) {
+    return res.status(400).json({ error: "Message is too long (max 500 characters)." });
+  }
+  const msg = {
+    id: id(),
+    gameId,
+    text: body,
+    email, // internal, for own-delete authorization; never sent to clients
+    author: nameFromEmail(email),
+    ts: Date.now(),
+  };
+  db.chat.push(msg);
+  // Trim per-game storage cap.
+  const gameMsgs = db.chat.filter((m) => m.gameId === gameId);
+  if (gameMsgs.length > CHAT_LIMIT * 3) {
+    const keepIds = new Set(gameMsgs.slice(-CHAT_LIMIT * 2).map((m) => m.id));
+    db.chat = db.chat.filter((m) => m.gameId !== gameId || keepIds.has(m.id));
+  }
+  saveDB(db);
+  broadcast("chat", { id: msg.id, gameId });
+  res.status(201).json(publicChatMsg(msg));
+});
+
+// Whether the requester owns a message (for the frontend to show a delete button).
+// POST { sessionToken } -> { ids: [messageIds owned by this email] }
+app.post("/api/chat/mine", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ ids: [] });
+  const db = loadDB();
+  const ids = db.chat.filter((m) => m.email === email).map((m) => m.id);
+  res.json({ ids });
+});
+
+// Delete a message: allowed if the requester is the author (valid session token
+// matching the message's email) OR an admin (x-admin-key header).
+app.delete("/api/chat/:msgId", (req, res) => {
+  const db = loadDB();
+  const msg = db.chat.find((m) => m.id === req.params.msgId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+
+  const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
+  const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
+  const isOwner = requesterEmail && requesterEmail === msg.email;
+
+  if (!isAdmin && !isOwner) {
+    return res.status(403).json({ error: "You can only delete your own messages." });
+  }
+  db.chat = db.chat.filter((m) => m.id !== req.params.msgId);
+  saveDB(db);
+  broadcast("chat", { deleted: req.params.msgId, gameId: msg.gameId });
+  res.json({ ok: true });
+});
+
 // ---------- Admin API ----------
 app.post("/api/admin/verify", (req, res) => {
   const { key } = req.body || {};
   if (key === ADMIN_KEY) return res.json({ ok: true });
   res.status(401).json({ error: "Invalid admin key." });
+});
+
+// ---- Admin: games CRUD ----
+app.post("/api/admin/games", requireAdmin, (req, res) => {
+  const { name, emoji, description } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: "Game name is required." });
+  const db = loadDB();
+  const game = {
+    id: id(),
+    name: name.trim(),
+    emoji: (emoji || "\uD83C\uDFAE").trim(), // default 🎮
+    description: (description || "").trim(),
+    ts: Date.now(),
+  };
+  db.games.push(game);
+  saveDB(db);
+  broadcast("games", { id: game.id });
+  res.status(201).json(game);
+});
+
+app.put("/api/admin/games/:gameId", requireAdmin, (req, res) => {
+  const { name, emoji, description } = req.body || {};
+  const db = loadDB();
+  const game = db.games.find((g) => g.id === req.params.gameId);
+  if (!game) return res.status(404).json({ error: "Game not found." });
+  if (name !== undefined) {
+    if (!name.trim()) return res.status(400).json({ error: "Game name cannot be empty." });
+    game.name = name.trim();
+  }
+  if (emoji !== undefined) game.emoji = (emoji || "\uD83C\uDFAE").trim();
+  if (description !== undefined) game.description = description.trim();
+  saveDB(db);
+  broadcast("games", { id: game.id });
+  res.json({ ok: true, game });
+});
+
+// Delete a game and all its matches, predictions for those matches, and chat.
+app.delete("/api/admin/games/:gameId", requireAdmin, (req, res) => {
+  const db = loadDB();
+  const gid = req.params.gameId;
+  if (!db.games.find((g) => g.id === gid)) {
+    return res.status(404).json({ error: "Game not found." });
+  }
+  const matchIds = new Set(db.matches.filter((m) => m.gameId === gid).map((m) => m.id));
+  db.games = db.games.filter((g) => g.id !== gid);
+  db.matches = db.matches.filter((m) => m.gameId !== gid);
+  db.predictions = db.predictions.filter((v) => !matchIds.has(v.matchId));
+  db.chat = db.chat.filter((c) => c.gameId !== gid);
+  saveDB(db);
+  broadcast("games", { deleted: gid });
+  broadcast("matches", {});
+  res.json({ ok: true });
 });
 
 app.post("/api/admin/players", requireAdmin, (req, res) => {
@@ -489,7 +836,10 @@ app.delete("/api/admin/players/:playerId", requireAdmin, (req, res) => {
 });
 
 app.post("/api/admin/matches", requireAdmin, (req, res) => {
-  const { playerAId, playerBId, time, day, location } = req.body || {};
+  const { gameId, playerAId, playerBId, time, day, location } = req.body || {};
+  if (!gameId) {
+    return res.status(400).json({ error: "A game is required." });
+  }
   if (!playerAId || !playerBId) {
     return res.status(400).json({ error: "Both players are required." });
   }
@@ -497,24 +847,28 @@ app.post("/api/admin/matches", requireAdmin, (req, res) => {
     return res.status(400).json({ error: "A match needs two different players." });
   }
   const db = loadDB();
+  if (!db.games.find((g) => g.id === gameId)) {
+    return res.status(400).json({ error: "Unknown game." });
+  }
   const ids = db.players.map((p) => p.id);
   if (!ids.includes(playerAId) || !ids.includes(playerBId)) {
     return res.status(400).json({ error: "Unknown player(s)." });
   }
   const match = {
     id: id(),
+    gameId,
     playerAId,
     playerBId,
     time: (time || "").trim(),
     day: (day || "Today").trim(),
-    location: (location || "Sky Deck - Tower A").trim(),
+    location: (location || "").trim(),
     status: "upcoming",
     result: null,
     winnerId: null,
   };
   db.matches.push(match);
   saveDB(db);
-  broadcast("matches", { id: match.id });
+  broadcast("matches", { id: match.id, gameId });
   res.status(201).json(match);
 });
 
@@ -563,8 +917,8 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, (req, res) => {
 // Set the live/upcoming status of a match (does not affect the result).
 app.post("/api/admin/matches/:matchId/status", requireAdmin, (req, res) => {
   const { status } = req.body || {};
-  if (!["upcoming", "live"].includes(status)) {
-    return res.status(400).json({ error: "Status must be 'upcoming' or 'live'." });
+  if (!["upcoming", "live", "over"].includes(status)) {
+    return res.status(400).json({ error: "Status must be 'upcoming', 'live', or 'over'." });
   }
   const db = loadDB();
   const match = db.matches.find((m) => m.id === req.params.matchId);
@@ -574,13 +928,27 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, (req, res) => {
       .status(409)
       .json({ error: "This match is finished (has a result). Clear the result first to change status." });
   }
+  const wasLive = match.status === "live";
   match.status = status;
   saveDB(db);
   broadcast("matches", { id: match.id });
-  res.json({ ok: true, match });
+
+  // Only notify on the TRANSITION into live (not if it was already live).
+  let notify = null;
+  if (status === "live" && !wasLive) {
+    const baseUrl =
+      process.env.PUBLIC_URL ||
+      `${req.protocol}://${req.get("host")}`;
+    // Fire-and-forget so the admin response is instant.
+    notifyMatchLive(db, match, baseUrl).catch((e) =>
+      console.error("[notify] error:", e.message)
+    );
+    notify = { queued: true, recipients: db.notifyOptIns.length };
+  }
+  res.json({ ok: true, match, notify });
 });
 
 app.listen(PORT, () => {
-  console.log(`CHECKMATE server running at http://localhost:${PORT}`);
+  console.log(`SnapGames server running at http://localhost:${PORT}`);
   console.log(`Admin key: ${ADMIN_KEY}`);
 });

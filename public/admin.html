@@ -3,18 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Admin — CHECKMATE</title>
-  <link rel="stylesheet" href="/style.css?v=5" />
+  <title>Admin — SnapGames</title>
+  <link rel="stylesheet" href="/style.css?v=10" />
 </head>
 <body>
   <header class="topbar">
     <div class="container topbar-inner">
-      <div class="brand">CHECK<span class="mate">MATE</span>
+      <div class="brand"><a href="/">SNAP<span class="mate">GAMES</span></a>
         <span class="sub">ADMIN CONTROL</span>
       </div>
       <nav class="nav">
-        <a href="/">Matches</a>
-        <a href="/leaderboard.html">Leaderboards</a>
+        <a href="/">Games</a>
         <a href="/community.html">Community</a>
         <a href="/admin.html" class="active">Admin</a>
       </nav>
@@ -32,6 +31,19 @@
 
     <!-- Panel -->
     <div id="panel" style="display:none">
+      <!-- Manage Games -->
+      <div style="text-align:center"><span class="section-title">🎮 Manage Games</span></div>
+      <div class="card">
+        <div class="row">
+          <div><label>Game Name</label><input id="gName" placeholder="e.g. Carrom" /></div>
+          <div><label>Emoji / Icon</label><input id="gEmoji" placeholder="e.g. 🔴" maxlength="4" /></div>
+        </div>
+        <label>Description</label>
+        <input id="gDesc" placeholder="Short description" />
+        <button class="btn" onclick="addGame()">Add Game</button>
+        <div id="gamesList" style="margin-top:18px"></div>
+      </div>
+
       <div style="text-align:center"><span class="section-title">Add Player</span></div>
       <div class="card">
         <div class="row">
@@ -44,7 +56,9 @@
 
       <div style="text-align:center"><span class="section-title">Add Match</span></div>
       <div class="card">
-        <div class="row">
+        <label>Game</label>
+        <select id="mGame"></select>
+        <div class="row" style="margin-top:10px">
           <div><label>Player A</label><select id="mA"></select></div>
           <div><label>Player B</label><select id="mB"></select></div>
         </div>
@@ -53,13 +67,15 @@
           <div><label>Day</label><input id="mDay" placeholder="Today" value="Today" /></div>
         </div>
         <label>Location</label>
-        <input id="mLoc" placeholder="Sky Deck - Tower A" value="Sky Deck - Tower A" />
+        <input id="mLoc" placeholder="e.g. Sky Deck - Tower A" />
         <button class="btn" onclick="addMatch()">Add Match</button>
       </div>
 
-      <div style="text-align:center"><span class="section-title">Manage Matches & Winners</span></div>
+      <div style="text-align:center"><span class="section-title">Manage Matches & Results</span></div>
       <div class="card">
-        <div id="adminMatches"></div>
+        <label>Filter by game</label>
+        <select id="matchGameFilter" onchange="loadAdminData()"></select>
+        <div id="adminMatches" style="margin-top:14px"></div>
       </div>
 
       <div style="text-align:center"><span class="section-title">💬 Community Moderation</span></div>
@@ -75,7 +91,7 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/app.js?v=5"></script>
+  <script src="/app.js?v=10"></script>
   <script>initAdmin();</script>
 </body>
 </html>

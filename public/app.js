@@ -1,4 +1,5 @@
 // ---------- Shared helpers ----------
+var CURRENT_GAME_ID = null; // set on the per-game page
 function api(path, opts = {}) {
   return fetch(path, {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
@@ -139,11 +140,14 @@ async function submitOtp() {
       body: JSON.stringify({ email: window._pendingEmail, code }),
     });
     setSession(r.token, r.email, r.name);
-    toast("Email verified! You can now predict and post.", "ok");
+    toast("Email verified! You can now predict, post and chat.", "ok");
     closeVerify();
     renderVerifyBar();
-    if (document.getElementById("matches")) renderMatches();
+    if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches(typeof CURRENT_GAME_ID !== "undefined" ? CURRENT_GAME_ID : undefined);
     if (document.getElementById("postForm")) renderPostForm();
+    if (document.getElementById("posts")) renderPosts();
+    if (document.getElementById("chatComposer")) { renderChatComposer(); renderChat(true); }
+    if (document.getElementById("notifyBar")) renderNotifyBar();
   } catch (e) {
     toast(e.message, "err");
   }
@@ -152,13 +156,16 @@ async function submitOtp() {
 function signOutVoter() {
   clearSession();
   renderVerifyBar();
-  if (document.getElementById("matches")) renderMatches();
+  if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches(typeof CURRENT_GAME_ID !== "undefined" ? CURRENT_GAME_ID : undefined);
   if (document.getElementById("postForm")) renderPostForm();
+    if (document.getElementById("posts")) renderPosts();
+  if (document.getElementById("chatComposer")) { renderChatComposer(); renderChat(false); }
+    if (document.getElementById("notifyBar")) renderNotifyBar();
   toast("Signed out", "ok");
 }
 
 // ---------- Public: matches + predictions ----------
-async function renderMatches() {
+async function renderMatches(gameId) {
   renderVerifyBar();
   const containers = {
     live: document.getElementById("liveMatches"),
@@ -169,8 +176,9 @@ async function renderMatches() {
   const legacy = document.getElementById("matches");
   if (!containers.live && !containers.upcoming && !legacy) return;
   try {
+    const matchesUrl = gameId ? `/api/matches?gameId=${encodeURIComponent(gameId)}` : "/api/matches";
     const [matches, serverMine] = await Promise.all([
-      api("/api/matches"),
+      api(matchesUrl),
       isVerified()
         ? api("/api/my-predictions", {
             method: "POST",
@@ -191,7 +199,10 @@ async function renderMatches() {
 
     const groups = { live: [], upcoming: [], finished: [] };
     matches.forEach((m) => {
-      const s = m.status === "finished" ? "finished" : m.status === "live" ? "live" : "upcoming";
+      let s;
+      if (m.status === "finished" || m.status === "over") s = "finished"; // both are "match ended"
+      else if (m.status === "live") s = "live";
+      else s = "upcoming";
       groups[s].push(m);
     });
 
@@ -237,9 +248,14 @@ function matchCardHTML(m, minePid) {
   const pctA = total ? Math.round((m.votesA / total) * 100) : 34;
   const pctD = total ? Math.round(((m.votesDraw || 0) / total) * 100) : 33;
   const pctB = 100 - pctA - pctD;
-  const closed = !!m.result;
+  // Predictions are open ONLY while the match is Upcoming.
+  const predOpen = m.status === "upcoming";
+  const closed = !predOpen;
   const isLive = m.status === "live";
-  const liveBadge = isLive ? `<span class="chip live-chip">🔴 LIVE</span>` : "";
+  const isOver = m.status === "over";
+  const statusBadge = isLive ? `<span class="chip live-chip">🔴 LIVE</span>`
+    : isOver ? `<span class="chip over-chip">🏁 GAME OVER</span>`
+    : "";
   const resultBadge = m.isDraw
     ? `<span class="chip win" style="background:#8a8f98;color:#0a0a0a">🤝 Draw · ½–½</span>`
     : m.winner
@@ -250,26 +266,30 @@ function matchCardHTML(m, minePid) {
   if (drawMine) drawCls.push("supported");
   if (m.isDraw) drawCls.push("winner");
   const drawRow = `
-    <div class="${drawCls.join(" ")}" ${closed ? 'style="cursor:default"' : `onclick="predict('${m.id}','draw')"`}>
+    <div class="${drawCls.join(" ")}" ${predOpen ? `onclick="predict('${m.id}','draw')"` : 'style="cursor:default"'}>
       <span class="draw-label">🤝 Draw</span>
       <span class="draw-votes">${m.votesDraw || 0} prediction${(m.votesDraw || 0) === 1 ? "" : "s"}</span>
       ${m.isDraw ? '<span class="draw-tag win-tag">RESULT</span>'
-        : closed ? (drawMine ? '<span class="draw-tag">You predicted</span>' : "")
+        : !predOpen ? (drawMine ? '<span class="draw-tag">You predicted</span>' : "")
         : `<span class="draw-tag ${drawMine ? "on" : ""}">${drawMine ? "✓ Predicted" : "Predict Draw"}</span>`}
     </div>`;
+  const hint = predOpen ? "Predict the winner — or a draw"
+    : isLive ? "🔴 Match is live — predictions closed"
+    : isOver ? "🏁 Game over — awaiting result"
+    : "Predictions closed";
   return `
-  <div class="match-card ${isLive ? "is-live" : ""}">
+  <div class="match-card ${isLive ? "is-live" : ""} ${isOver ? "is-over" : ""}">
     <div class="match-meta">
-      ${liveBadge}
+      ${statusBadge}
       ${m.time ? `<span class="chip">⏱ ${esc(m.time)}</span>` : ""}
       ${m.day ? `<span class="chip ghost">${esc(m.day)}</span>` : ""}
       ${m.location ? `<span class="chip ghost">📍 ${esc(m.location)}</span>` : ""}
       ${resultBadge}
     </div>
     <div class="versus">
-      ${playerCell(m, m.playerA, m.votesA, minePid, closed)}
+      ${playerCell(m, m.playerA, m.votesA, minePid, predOpen)}
       <div class="vs">VS</div>
-      ${playerCell(m, m.playerB, m.votesB, minePid, closed)}
+      ${playerCell(m, m.playerB, m.votesB, minePid, predOpen)}
     </div>
     <div class="votebar">
       <div class="a" style="width:${pctA}%"></div>
@@ -277,25 +297,25 @@ function matchCardHTML(m, minePid) {
       <div class="b" style="width:${pctB}%"></div>
     </div>
     ${drawRow}
-    <div class="predict-hint">${closed ? "Predictions closed" : "Predict the winner — or a draw"}</div>
+    <div class="predict-hint">${hint}</div>
   </div>`;
 }
 
-function playerCell(match, player, votes, minePid, closed) {
+function playerCell(match, player, votes, minePid, predOpen) {
   if (!player) return "<div></div>";
   const isMine = minePid === player.id;
   const isWinner = match.winner && match.winner.id === player.id;
   const cls = ["player"];
   if (isMine) cls.push("supported");
   if (isWinner) cls.push("winner");
-  const clickable = closed ? "" : `onclick="predict('${match.id}','${player.id}')"`;
+  const clickable = predOpen ? `onclick="predict('${match.id}','${player.id}')"` : "";
   return `
-    <div class="${cls.join(" ")}" ${clickable} ${closed ? 'style="cursor:default"' : ""}>
+    <div class="${cls.join(" ")}" ${clickable} ${predOpen ? "" : 'style="cursor:default"'}>
       <div class="pname">${esc(player.name)}</div>
       <div class="porg">${esc(player.org || "")}</div>
       <div class="pvotes">${votes} prediction${votes === 1 ? "" : "s"}</div>
       ${isWinner ? '<div class="crown">👑 WINNER</div>'
-        : closed ? `<div class="crown" style="color:var(--muted)">${isMine ? "You predicted" : ""}</div>`
+        : !predOpen ? `<div class="crown" style="color:var(--muted)">${isMine ? "✓ You predicted" : ""}</div>`
         : `<button class="support-btn">${isMine ? "✓ Predicted" : "Predict"}</button>`}
     </div>`;
 }
@@ -307,34 +327,38 @@ async function predict(matchId, playerId) {
     return;
   }
   try {
-    await api(`/api/matches/${matchId}/predict`, {
+    const r = await api(`/api/matches/${matchId}/predict`, {
       method: "POST",
       body: JSON.stringify({ playerId, sessionToken: getSession().token }),
     });
     setMyPrediction(matchId, playerId);
-    toast("Your prediction is counted!", "ok");
-    renderMatches();
+    toast(r && r.autoOptedIn
+      ? "Prediction counted! You'll now get an email when matches go live."
+      : "Your prediction is counted!", "ok");
+    renderMatches(CURRENT_GAME_ID);
+    renderNotifyBar(); // auto-opt-in may have turned notifications on
   } catch (e) {
     if (/verify your email/i.test(e.message)) { clearSession(); openVerify(); }
     if (/already predicted/i.test(e.message)) {
       setMyPrediction(matchId, playerId);
       toast("You've already made your prediction for this match.", "err");
-      renderMatches();
+      renderMatches(CURRENT_GAME_ID);
       return;
     }
     // On any other failure, resync UI with server truth.
-    renderMatches();
+    renderMatches(CURRENT_GAME_ID);
     toast(e.message, "err");
   }
 }
 
 // ---------- Public: leaderboards ----------
-async function renderLeaderboards() {
+async function renderLeaderboards(gameId) {
+  const q = gameId ? `?gameId=${encodeURIComponent(gameId)}` : "";
   try {
     const [winners, predictions, predictors] = await Promise.all([
-      api("/api/leaderboard/winners"),
-      api("/api/leaderboard/predictions"),
-      api("/api/leaderboard/predictors"),
+      api("/api/leaderboard/winners" + q),
+      api("/api/leaderboard/predictions" + q),
+      api("/api/leaderboard/predictors" + q),
     ]);
 
     const wEl = document.getElementById("winners");
@@ -440,7 +464,18 @@ async function renderPosts() {
   const el = document.getElementById("posts");
   if (!el) return;
   try {
-    const posts = await api("/api/posts");
+    // Fetch posts and (if verified) which ones are mine, so authors see a
+    // delete button even on their own anonymous posts.
+    const [posts, mineRes] = await Promise.all([
+      api("/api/posts"),
+      isVerified()
+        ? api("/api/posts/mine", {
+            method: "POST",
+            body: JSON.stringify({ sessionToken: getSession().token }),
+          }).catch(() => ({ ids: [] }))
+        : Promise.resolve({ ids: [] }),
+    ]);
+    const mineIds = new Set(mineRes.ids || []);
     const isAdmin = !!adminKey();
     if (!posts.length) {
       el.innerHTML = '<div class="empty">No posts yet. Be the first to say something!</div>';
@@ -448,15 +483,16 @@ async function renderPosts() {
     }
     el.innerHTML = posts.map((p) => {
       const avatar = p.anonymous ? "🕶️" : esc((p.author || "?").charAt(0).toUpperCase());
+      const canDelete = isAdmin || mineIds.has(p.id);
       return `
       <div class="post">
         <div class="post-head">
           <div class="avatar ${p.anonymous ? "anon" : ""}">${avatar}</div>
           <div>
-            <div class="post-author">${esc(p.author)}</div>
+            <div class="post-author">${esc(p.author)}${mineIds.has(p.id) ? ' <span class="anon-tag">you</span>' : ""}</div>
             <div class="post-time">${timeAgo(p.ts)}</div>
           </div>
-          ${isAdmin ? `<button class="btn danger" style="margin-left:auto" onclick="delPost('${p.id}')">Delete</button>` : ""}
+          ${canDelete ? `<button class="btn danger" style="margin-left:auto" onclick="delPost('${p.id}')">Delete</button>` : ""}
         </div>
         <div class="post-body">${esc(p.text)}</div>
       </div>`;
@@ -469,29 +505,181 @@ async function renderPosts() {
 async function delPost(postId) {
   if (!confirm("Delete this post?")) return;
   try {
-    await api(`/api/admin/posts/${postId}`, { method: "DELETE", headers: adminHeaders() });
+    // Owner-or-admin endpoint: send admin key if present, and the session token.
+    await api(`/api/posts/${postId}`, {
+      method: "DELETE",
+      headers: adminKey() ? adminHeaders() : {},
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
     toast("Post deleted", "ok");
     renderPosts();
   } catch (e) { toast(e.message, "err"); }
 }
 
+// ---------- Notifications opt-in (home page) ----------
+async function renderNotifyBar() {
+  const el = document.getElementById("notifyBar");
+  if (!el) return;
+  if (!isVerified()) {
+    el.innerHTML = `
+      <span>🔔 Get an <strong>email</strong> when a match goes live.</span>
+      <button class="btn small" onclick="openVerify()">Verify to enable</button>`;
+    return;
+  }
+  let optedIn = false;
+  try {
+    const r = await api("/api/notifications/status", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    optedIn = !!r.optedIn;
+  } catch { /* ignore */ }
+  el.innerHTML = optedIn
+    ? `<span class="notify-on">🔔 Match notifications <strong>ON</strong> — you'll get an email when a match goes live.</span>
+       <button class="btn small ghost" onclick="setNotify(false)">Turn off</button>`
+    : `<span>🔕 Match notifications are <strong>off</strong>.</span>
+       <button class="btn small" onclick="setNotify(true)">Notify me by email</button>`;
+}
+
+async function setNotify(optIn) {
+  if (!isVerified()) { openVerify(); return; }
+  try {
+    await api("/api/notifications/set", {
+      method: "POST",
+      body: JSON.stringify({ optIn, sessionToken: getSession().token }),
+    });
+    toast(optIn ? "You'll be emailed when matches go live" : "Notifications turned off", "ok");
+    renderNotifyBar();
+  } catch (e) {
+    if (/verify your email/i.test(e.message)) { clearSession(); renderNotifyBar(); openVerify(); }
+    toast(e.message, "err");
+  }
+}
+
+// ---------- SnapGames: home (games grid + live-now + stats) ----------
+function gameCardHTML(g) {
+  const parts = [];
+  if (g.liveCount) parts.push(`<span class="gc-live">🔴 ${g.liveCount} live</span>`);
+  if (g.upcomingCount) parts.push(`<span class="gc-tag">${g.upcomingCount} upcoming</span>`);
+  if (g.completedCount) parts.push(`<span class="gc-tag">${g.completedCount} done</span>`);
+  if (!parts.length) parts.push(`<span class="gc-tag">No matches yet</span>`);
+  return `
+    <a class="game-card ${g.liveCount ? "has-live" : ""}" href="/game.html?id=${g.id}">
+      <div class="game-emoji">${esc(g.emoji || "🎮")}</div>
+      <div class="game-name">${esc(g.name)}</div>
+      <div class="game-desc">${esc(g.description || "")}</div>
+      <div class="game-meta">${parts.join("")}</div>
+    </a>`;
+}
+
+async function renderStats() {
+  const el = document.getElementById("statsBar");
+  if (!el) return;
+  try {
+    const s = await api("/api/stats");
+    el.innerHTML = `
+      <div class="stat"><div class="stat-n">${s.games}</div><div class="stat-l">Games</div></div>
+      <div class="stat"><div class="stat-n">${s.liveMatches}</div><div class="stat-l">Live now</div></div>
+      <div class="stat"><div class="stat-n">${s.matches}</div><div class="stat-l">Matches</div></div>
+      <div class="stat"><div class="stat-n">${s.predictions}</div><div class="stat-l">Predictions</div></div>
+      <div class="stat"><div class="stat-n">${s.players}</div><div class="stat-l">Players</div></div>`;
+  } catch { /* ignore */ }
+}
+
+async function renderGamesGrid() {
+  const grid = document.getElementById("gamesGrid");
+  if (!grid) return;
+  try {
+    const games = await api("/api/games");
+    grid.innerHTML = games.length
+      ? games.map(gameCardHTML).join("")
+      : '<div class="empty">No games yet. An admin can add games in the Admin panel.</div>';
+
+    // Live-now strip
+    const live = games.filter((g) => g.liveCount > 0);
+    const liveSection = document.getElementById("section-livenow");
+    const liveGrid = document.getElementById("liveNow");
+    if (liveGrid) {
+      if (live.length) {
+        liveGrid.innerHTML = live.map(gameCardHTML).join("");
+        if (liveSection) liveSection.style.display = "";
+      } else if (liveSection) {
+        liveSection.style.display = "none";
+      }
+    }
+  } catch (e) {
+    grid.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
 // ---------- Page bootstrappers ----------
 function initHome() {
-  renderMatches();
+  renderVerifyBar();
+  renderNotifyBar();
+  renderStats();
+  renderGamesGrid();
   connectRealtime({
-    predictions: () => renderMatches(),
-    matches: () => renderMatches(),
-    winner: () => renderMatches(),
+    games: () => { renderGamesGrid(); renderStats(); },
+    matches: () => { renderGamesGrid(); renderStats(); },
+    winner: () => { renderGamesGrid(); renderStats(); },
+    predictions: () => renderStats(),
   });
 }
 
-function initLeaderboard() {
-  renderLeaderboards();
-  connectRealtime({
-    predictions: () => renderLeaderboards(),
-    winner: () => renderLeaderboards(),
-    matches: () => renderLeaderboards(),
+// ---------- Per-game page ----------
+
+function gameIdFromUrl() {
+  return new URLSearchParams(location.search).get("id");
+}
+
+async function renderGameHeader() {
+  const el = document.getElementById("gameHeader");
+  if (!el) return;
+  try {
+    const g = await api("/api/games/" + CURRENT_GAME_ID);
+    document.title = `${g.name} — SnapGames`;
+    el.innerHTML = `
+      <div class="game-emoji big">${esc(g.emoji || "🎮")}</div>
+      <div>
+        <h2 class="game-title">${esc(g.name)}</h2>
+        <p class="game-subtitle">${esc(g.description || "")}</p>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function switchTab(name) {
+  ["matches", "standings", "chat"].forEach((t) => {
+    const panel = document.getElementById("tab-" + t);
+    if (panel) panel.style.display = t === name ? "" : "none";
   });
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  if (name === "standings") renderLeaderboards(CURRENT_GAME_ID);
+  if (name === "chat") { renderChatComposer(); renderChat(true); }
+}
+
+function initGame() {
+  CURRENT_GAME_ID = gameIdFromUrl();
+  if (!CURRENT_GAME_ID) { location.href = "/"; return; }
+  renderGameHeader();
+  renderVerifyBar();
+  renderNotifyBar();
+  renderMatches(CURRENT_GAME_ID);
+  connectRealtime({
+    predictions: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
+    matches: () => renderMatches(CURRENT_GAME_ID),
+    winner: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
+    chat: (e) => { if (isTabVisible("chat")) renderChat(true); },
+    games: () => renderGameHeader(),
+  });
+}
+
+function isTabVisible(name) {
+  const p = document.getElementById("tab-" + name);
+  return p && p.style.display !== "none";
 }
 
 function initCommunity() {
@@ -500,6 +688,116 @@ function initCommunity() {
   renderPosts();
   connectRealtime({
     posts: () => renderPosts(),
+  });
+}
+
+// ---------- Per-game chat ----------
+let _chatMineIds = new Set();
+
+function renderChatComposer() {
+  const el = document.getElementById("chatComposer");
+  if (!el) return;
+  if (isVerified()) {
+    const s = getSession();
+    el.innerHTML = `
+      <div class="chat-as">Chatting as <strong>${esc(s.name || s.email)}</strong></div>
+      <div class="chat-input-row">
+        <input id="chatText" maxlength="500" placeholder="Type a message..." autocomplete="off" />
+        <button class="btn small" onclick="sendChat()">Send</button>
+      </div>`;
+    const input = document.getElementById("chatText");
+    input.addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+  } else {
+    el.innerHTML = `
+      <div style="text-align:center">
+        <p style="color:var(--muted);margin-bottom:10px">Verify your Snapdeal email to join the chat.</p>
+        <button class="btn small" onclick="openVerify()">Verify Email</button>
+      </div>`;
+  }
+}
+
+async function refreshChatMine() {
+  if (!isVerified()) { _chatMineIds = new Set(); return; }
+  try {
+    const r = await api("/api/chat/mine", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    _chatMineIds = new Set(r.ids || []);
+  } catch { _chatMineIds = new Set(); }
+}
+
+async function renderChat(scroll = true) {
+  const el = document.getElementById("chatMessages");
+  if (!el) return;
+  try {
+    await refreshChatMine();
+    const msgs = await api("/api/chat" + (CURRENT_GAME_ID ? `?gameId=${encodeURIComponent(CURRENT_GAME_ID)}` : ""));
+    const isAdmin = !!adminKey();
+    if (!msgs.length) {
+      el.innerHTML = '<div class="empty">No messages yet. Say hi! 👋</div>';
+      return;
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    el.innerHTML = msgs.map((m) => {
+      const mine = _chatMineIds.has(m.id);
+      const canDelete = mine || isAdmin;
+      return `
+      <div class="chat-msg ${mine ? "mine" : ""}">
+        <div class="chat-avatar">${esc((m.author || "?").charAt(0).toUpperCase())}</div>
+        <div class="chat-bubble">
+          <div class="chat-meta"><span class="chat-name">${esc(m.author)}</span><span class="chat-time">${timeAgo(m.ts)}</span></div>
+          <div class="chat-body">${esc(m.text)}</div>
+        </div>
+        ${canDelete ? `<button class="chat-del" title="Delete" onclick="deleteChat('${m.id}')">×</button>` : ""}
+      </div>`;
+    }).join("");
+    if (scroll && nearBottom) el.scrollTop = el.scrollHeight;
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function sendChat() {
+  if (!isVerified()) { openVerify(); return; }
+  const input = document.getElementById("chatText");
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = "";
+  try {
+    await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ text, gameId: CURRENT_GAME_ID, sessionToken: getSession().token }),
+    });
+    const el = document.getElementById("chatMessages");
+    await renderChat(true);
+    if (el) el.scrollTop = el.scrollHeight;
+  } catch (e) {
+    if (/verify your email/i.test(e.message)) { clearSession(); renderChatComposer(); openVerify(); }
+    toast(e.message, "err");
+  }
+}
+
+async function deleteChat(msgId) {
+  if (!confirm("Delete this message?")) return;
+  try {
+    // Send both credentials; server allows if owner (session) OR admin (key).
+    await api(`/api/chat/${msgId}`, {
+      method: "DELETE",
+      headers: adminKey() ? adminHeaders() : {},
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    toast("Message deleted", "ok");
+    renderChat(false);
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function initChat() {
+  renderVerifyBar();
+  renderChatComposer();
+  renderChat(true);
+  connectRealtime({
+    chat: () => renderChat(true),
   });
 }
 
@@ -547,6 +845,7 @@ function showPanel() {
   connectRealtime({
     moderation: () => loadModQueue(),
     matches: () => loadAdminData(),
+    games: () => loadAdminData(),
     predictions: () => {},
   });
 }
@@ -605,11 +904,42 @@ async function rejectPost(postId) {
 }
 
 async function loadAdminData() {
-  const [players, matches] = await Promise.all([
+  const filterSel = document.getElementById("matchGameFilter");
+  const filterGameId = filterSel ? filterSel.value : "";
+  const [games, players, matches] = await Promise.all([
+    api("/api/games"),
     api("/api/players"),
-    api("/api/matches"),
+    api("/api/matches" + (filterGameId ? `?gameId=${encodeURIComponent(filterGameId)}` : "")),
   ]);
+  const gameNameById = {};
+  games.forEach((g) => (gameNameById[g.id] = `${g.emoji || "🎮"} ${g.name}`));
 
+  // Games list
+  const gamesListEl = document.getElementById("gamesList");
+  if (gamesListEl) {
+    gamesListEl.innerHTML = games.length
+      ? games.map((g) => `
+          <div class="list-item">
+            <div><strong>${esc(g.emoji || "🎮")} ${esc(g.name)}</strong>
+              <span style="color:var(--muted)">· ${g.matchCount} match${g.matchCount === 1 ? "" : "es"}${g.liveCount ? " · 🔴 " + g.liveCount + " live" : ""}</span>
+              ${g.description ? `<div style="color:var(--muted);font-size:12px">${esc(g.description)}</div>` : ""}
+            </div>
+            <button class="btn danger" onclick="delGame('${g.id}')">Delete</button>
+          </div>`).join("")
+      : '<div class="empty">No games yet. Add one above.</div>';
+  }
+
+  // Game selectors (add-match + filter)
+  const gameOpts = games.map((g) => `<option value="${g.id}">${esc(g.emoji || "🎮")} ${esc(g.name)}</option>`).join("");
+  const mGame = document.getElementById("mGame");
+  if (mGame) mGame.innerHTML = games.length ? gameOpts : '<option value="">— add a game first —</option>';
+  if (filterSel) {
+    const cur = filterSel.value;
+    filterSel.innerHTML = `<option value="">All games</option>` + gameOpts;
+    filterSel.value = cur;
+  }
+
+  // Players list
   document.getElementById("playersList").innerHTML = players.length
     ? players.map((p) => `
         <div class="list-item">
@@ -625,18 +955,21 @@ async function loadAdminData() {
   document.getElementById("adminMatches").innerHTML = matches.length
     ? matches.map((m) => {
         const resultText = m.isDraw ? " · 🤝 Draw (½–½)" : m.winner ? " · 🏆 " + esc(m.winner.name) : "";
+        const gameTag = gameNameById[m.gameId] ? `<span class="chip ghost" style="margin:0 0 4px">${esc(gameNameById[m.gameId])}</span>` : "";
         const finished = m.status === "finished";
         const statusControl = finished
-          ? `<span class="chip win" style="margin:0">✅ Finished</span>`
+          ? `<span class="chip win" style="margin:0">✅ Result set</span>`
           : `<div class="status-toggle">
                <button class="seg ${m.status === "upcoming" ? "on" : ""}" onclick="setStatus('${m.id}','upcoming')">🕒 Upcoming</button>
                <button class="seg ${m.status === "live" ? "on live" : ""}" onclick="setStatus('${m.id}','live')">🔴 Live</button>
+               <button class="seg ${m.status === "over" ? "on over" : ""}" onclick="setStatus('${m.id}','over')">🏁 Game Over</button>
              </div>`;
         return `
         <div class="list-item" style="flex-wrap:wrap;gap:10px">
           <div style="flex:1;min-width:200px">
-            <strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs
-            <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong>
+            ${gameTag}
+            <div><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs
+            <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
             <div style="color:var(--muted);font-size:12px">${esc(m.time || "")} · ${esc(m.day || "")}${resultText}</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
@@ -655,13 +988,43 @@ async function loadAdminData() {
     : '<div class="empty">No matches yet.</div>';
 }
 
+// ---- Admin: games ----
+async function addGame() {
+  const name = document.getElementById("gName").value.trim();
+  const emoji = document.getElementById("gEmoji").value.trim();
+  const description = document.getElementById("gDesc").value.trim();
+  if (!name) return toast("Game name is required", "err");
+  try {
+    await api("/api/admin/games", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ name, emoji, description }),
+    });
+    document.getElementById("gName").value = "";
+    document.getElementById("gEmoji").value = "";
+    document.getElementById("gDesc").value = "";
+    toast("Game added", "ok");
+    loadAdminData();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function delGame(gameId) {
+  if (!confirm("Delete this game? All its matches, predictions and chat will be removed.")) return;
+  try {
+    await api(`/api/admin/games/${gameId}`, { method: "DELETE", headers: adminHeaders() });
+    toast("Game deleted", "ok");
+    loadAdminData();
+  } catch (e) { toast(e.message, "err"); }
+}
+
 async function setStatus(matchId, status) {
   try {
     await api(`/api/admin/matches/${matchId}/status`, {
       method: "POST", headers: adminHeaders(),
       body: JSON.stringify({ status }),
     });
-    toast(status === "live" ? "Match set to LIVE" : "Match set to Upcoming", "ok");
+    toast(status === "live" ? "Match set to LIVE — notifications sent"
+      : status === "over" ? "Match set to Game Over"
+      : "Match set to Upcoming", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
 }
@@ -692,16 +1055,18 @@ async function delPlayer(id) {
 }
 
 async function addMatch() {
+  const gameId = document.getElementById("mGame").value;
   const playerAId = document.getElementById("mA").value;
   const playerBId = document.getElementById("mB").value;
   const time = document.getElementById("mTime").value.trim();
   const day = document.getElementById("mDay").value.trim();
   const location = document.getElementById("mLoc").value.trim();
+  if (!gameId) return toast("Pick a game (add one first if none)", "err");
   if (playerAId === playerBId) return toast("Pick two different players", "err");
   try {
     await api("/api/admin/matches", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ playerAId, playerBId, time, day, location }),
+      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location }),
     });
     document.getElementById("mTime").value = "";
     toast("Match added", "ok");
