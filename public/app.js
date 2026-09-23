@@ -57,6 +57,24 @@ function isVerified() {
   return !!getSession().token;
 }
 
+// Validate the stored token against the server; clear it if the server says
+// it's invalid/expired (e.g. after a restart that rotated SESSION_SECRET).
+// Prevents the UI showing "Verified as ..." with a token the server rejects.
+async function validateSession() {
+  const { token } = getSession();
+  if (!token) return false;
+  try {
+    const r = await api("/api/notifications/status", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: token }),
+    });
+    if (!r.verified) { clearSession(); return false; }
+    return true;
+  } catch {
+    return false; // network/other error: don't wipe session on transient failure
+  }
+}
+
 // ---------- Realtime (SSE) ----------
 let _es = null;
 function connectRealtime(handlers) {
@@ -564,7 +582,8 @@ async function renderStats() {
       <div class="stat"><div class="stat-n">${s.games}</div><div class="stat-l">Games</div></div>
       <div class="stat"><div class="stat-n">${s.liveMatches}</div><div class="stat-l">Live now</div></div>
       <div class="stat"><div class="stat-n">${s.matches}</div><div class="stat-l">Matches</div></div>
-      <div class="stat"><div class="stat-n">${s.predictions}</div><div class="stat-l">Predictions</div></div>
+      <div class="stat"><div class="stat-n">${s.bids}</div><div class="stat-l">Bids</div></div>
+      <div class="stat"><div class="stat-n">${s.pointsWagered}</div><div class="stat-l">Points Bid</div></div>
       <div class="stat"><div class="stat-n">${s.players}</div><div class="stat-l">Players</div></div>`;
   } catch { /* ignore */ }
 }
@@ -601,6 +620,8 @@ function initHome() {
   renderNotifyBar();
   renderStats();
   renderGamesGrid();
+  // Validate any stored session against the server; if stale, clear and re-render.
+  validateSession().then((ok) => { if (!ok) { renderVerifyBar(); renderNotifyBar(); } });
   connectRealtime({
     games: () => { renderGamesGrid(); renderStats(); },
     matches: () => { renderGamesGrid(); renderStats(); },
@@ -651,6 +672,9 @@ function initGame() {
   renderVerifyBar();
   renderNotifyBar();
   renderMatches(CURRENT_GAME_ID);
+  validateSession().then((ok) => {
+    if (!ok) { renderVerifyBar(); renderNotifyBar(); renderMatches(CURRENT_GAME_ID); renderChatComposer(); }
+  });
   connectRealtime({
     bets: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
     matches: () => renderMatches(CURRENT_GAME_ID),
@@ -669,6 +693,7 @@ function initCommunity() {
   renderVerifyBar();
   renderPostForm();
   renderPosts();
+  validateSession().then((ok) => { if (!ok) { renderVerifyBar(); renderPostForm(); renderPosts(); } });
   connectRealtime({
     posts: () => renderPosts(),
   });
