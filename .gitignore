@@ -3,3 +3,4 @@ data/
 *.log
 nohup.out
 .DS_Store
+.env

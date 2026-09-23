@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Leaderboards — CHECKMATE</title>
-  <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/style.css?v=5" />
 </head>
 <body>
   <header class="topbar">
@@ -15,6 +15,7 @@
       <nav class="nav">
         <a href="/">Matches</a>
         <a href="/leaderboard.html" class="active">Leaderboards</a>
+        <a href="/community.html">Community</a>
         <a href="/admin.html">Admin</a>
       </nav>
     </div>
@@ -28,16 +29,22 @@
     <div id="winners" class="board"></div>
 
     <div style="text-align:center">
-      <span class="section-title">❤️ Support Leaderboard</span>
+      <span class="section-title">🎯 Top Predictors</span>
     </div>
-    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">Players ranked by total support received across all matches</p>
-    <div id="support" class="board"></div>
+    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">People ranked by how many match winners they predicted correctly</p>
+    <div id="predictors" class="board"></div>
+
+    <div style="text-align:center">
+      <span class="section-title">🔮 Most Predicted Players</span>
+    </div>
+    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">Players ranked by total predictions received across all matches</p>
+    <div id="predictions" class="board"></div>
   </main>
 
-  <div class="footer">CHECKMATE · Acevector · Support your champion</div>
+  <div class="footer">CHECKMATE · Acevector · Predict the champion</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js"></script>
-  <script>renderLeaderboards();</script>
+  <script src="/app.js?v=5"></script>
+  <script>initLeaderboard();</script>
 </body>
 </html>
