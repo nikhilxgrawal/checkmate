@@ -26,10 +26,12 @@ function loadDB() {
     db.matches = db.matches || [];
     db.predictions = db.predictions || db.votes || []; // migrate old "votes"
     db.posts = db.posts || [];
+    db.chat = db.chat || [];
+    db.notifyOptIns = db.notifyOptIns || []; // list of verified emails opted in to notifications
     delete db.votes;
     return db;
   } catch (e) {
-    return { players: [], matches: [], predictions: [], posts: [] };
+    return { players: [], matches: [], predictions: [], posts: [], chat: [], notifyOptIns: [] };
   }
 }
 
@@ -128,6 +130,47 @@ function playerMap(db) {
   return m;
 }
 
+// ---- Notification opt-in helpers (server-side list keyed by verified email) ----
+function isOptedIn(db, email) {
+  return db.notifyOptIns.includes(email);
+}
+// Add an email to the opt-in list (idempotent). Returns true if it was added.
+function addOptIn(db, email) {
+  if (!email || db.notifyOptIns.includes(email)) return false;
+  db.notifyOptIns.push(email);
+  return true;
+}
+function removeOptIn(db, email) {
+  const before = db.notifyOptIns.length;
+  db.notifyOptIns = db.notifyOptIns.filter((e) => e !== email);
+  return db.notifyOptIns.length !== before;
+}
+
+// Email all opted-in users that a match just went live. Fire-and-forget with a
+// small concurrency limit to respect SES send rate. Never blocks the response.
+async function notifyMatchLive(db, match, baseUrl) {
+  const pm = playerMap(db);
+  const a = pm[match.playerAId] ? pm[match.playerAId].name : "Player A";
+  const b = pm[match.playerBId] ? pm[match.playerBId].name : "Player B";
+  const line = `${a} vs ${b}`;
+  const url = (baseUrl || process.env.PUBLIC_URL || "").replace(/\/$/, "") || undefined;
+  const recipients = [...db.notifyOptIns];
+  if (recipients.length === 0) return { sent: 0 };
+
+  const CONCURRENCY = 3;
+  let i = 0, sent = 0, failed = 0;
+  async function worker() {
+    while (i < recipients.length) {
+      const to = recipients[i++];
+      const r = await auth.sendMatchLiveEmail(to, { title: line, line, url });
+      if (r.ok) sent++; else failed++;
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  console.log(`[notify] match ${match.id} live: emailed ${sent}/${recipients.length} (failed ${failed})`);
+  return { sent, failed, total: recipients.length };
+}
+
 // display name from email: "nikhil.agrawal@snapdeal.com" -> "Nikhil Agrawal"
 function nameFromEmail(email) {
   const local = String(email || "").split("@")[0];
@@ -157,10 +200,17 @@ function isDecided(match) {
 }
 
 // Effective status: "finished" if a result is set; otherwise the admin-set
-// status ("live" or "upcoming"), defaulting to "upcoming".
+// status: "live", "over" (game over, awaiting result), or "upcoming" (default).
 function effectiveStatus(match) {
   if (isDecided(match)) return "finished";
-  return match.status === "live" ? "live" : "upcoming";
+  if (match.status === "live") return "live";
+  if (match.status === "over") return "over";
+  return "upcoming";
+}
+
+// Predictions are allowed ONLY while the match is Upcoming (before it starts).
+function predictionsOpen(match) {
+  return effectiveStatus(match) === "upcoming";
 }
 
 // List matches enriched with prediction counts + result
@@ -233,8 +283,13 @@ app.post("/api/matches/:matchId/predict", (req, res) => {
   if (!isValidPick) {
     return res.status(400).json({ error: "Invalid prediction for this match." });
   }
-  if (isDecided(match)) {
-    return res.status(409).json({ error: "This match is over — predictions are closed." });
+  if (!predictionsOpen(match)) {
+    const s = effectiveStatus(match);
+    const msg =
+      s === "live" ? "This match is live — predictions are now closed."
+      : s === "over" ? "This match is over — predictions are closed."
+      : "Predictions are closed for this match.";
+    return res.status(409).json({ error: msg });
   }
 
   const existing = db.predictions.find(
@@ -255,9 +310,11 @@ app.post("/api/matches/:matchId/predict", (req, res) => {
       ts: Date.now(),
     });
   }
+  // Auto-opt-in this verified email to match notifications on first prediction.
+  const added = addOptIn(db, email);
   saveDB(db);
   broadcast("predictions", { matchId: match.id });
-  res.json({ ok: true });
+  res.json({ ok: true, notifyOptedIn: isOptedIn(db, email), autoOptedIn: added });
 });
 
 // Return the verified user's own predictions: { matchId: playerId }
@@ -271,6 +328,29 @@ app.post("/api/my-predictions", (req, res) => {
     .filter((v) => v.email === email)
     .forEach((v) => (mine[v.matchId] = v.playerId));
   res.json(mine);
+});
+
+// ---- Notification opt-in (email) ----
+// Get the requester's current opt-in status.
+app.post("/api/notifications/status", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ verified: false, optedIn: false });
+  const db = loadDB();
+  res.json({ verified: true, email, optedIn: isOptedIn(db, email) });
+});
+
+// Set the requester's opt-in status. Body: { sessionToken, optIn: boolean }
+app.post("/api/notifications/set", (req, res) => {
+  const { sessionToken, optIn } = req.body || {};
+  const email = auth.verifySession(sessionToken);
+  if (!email) {
+    return res.status(401).json({ error: "Please verify your email to change notifications." });
+  }
+  const db = loadDB();
+  if (optIn) addOptIn(db, email);
+  else removeOptIn(db, email);
+  saveDB(db);
+  res.json({ ok: true, optedIn: isOptedIn(db, email) });
 });
 
 // Player prediction leaderboard: total predictions received per player
@@ -378,6 +458,18 @@ app.get("/api/posts", (req, res) => {
   res.json(posts);
 });
 
+// Which approved posts belong to the requester (so the author sees a delete
+// button on their own posts, including anonymous ones). Returns { ids: [...] }.
+app.post("/api/posts/mine", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ ids: [] });
+  const db = loadDB();
+  const ids = db.posts
+    .filter((p) => isApproved(p) && p.email === email)
+    .map((p) => p.id);
+  res.json({ ids });
+});
+
 app.post("/api/posts", (req, res) => {
   const { text, sessionToken, anonymous } = req.body || {};
   const email = auth.verifySession(sessionToken);
@@ -454,6 +546,102 @@ app.delete("/api/admin/posts/:postId", requireAdmin, (req, res) => {
   saveDB(db);
   broadcast("posts", { deleted: req.params.postId });
   broadcast("moderation", { deleted: req.params.postId });
+  res.json({ ok: true });
+});
+
+// Delete a post: allowed if the requester is the author (session token matching
+// the post's email) OR an admin (x-admin-key header). Works for anonymous posts too.
+app.delete("/api/posts/:postId", (req, res) => {
+  const db = loadDB();
+  const post = db.posts.find((p) => p.id === req.params.postId);
+  if (!post) return res.status(404).json({ error: "Post not found." });
+
+  const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
+  const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
+  const isOwner = requesterEmail && requesterEmail === post.email;
+
+  if (!isAdmin && !isOwner) {
+    return res.status(403).json({ error: "You can only delete your own posts." });
+  }
+  db.posts = db.posts.filter((p) => p.id !== req.params.postId);
+  saveDB(db);
+  broadcast("posts", { deleted: req.params.postId });
+  broadcast("moderation", { deleted: req.params.postId });
+  res.json({ ok: true });
+});
+
+// ---------- Global chat (live, non-anonymous, verified users only) ----------
+const CHAT_LIMIT = 200;
+
+function publicChatMsg(m) {
+  // Never expose the raw email to clients; show the display name only.
+  return { id: m.id, text: m.text, author: m.author, ts: m.ts };
+}
+
+// Last 200 messages, oldest first (chat order).
+app.get("/api/chat", (req, res) => {
+  const db = loadDB();
+  const msgs = [...db.chat].sort((a, b) => a.ts - b.ts).slice(-CHAT_LIMIT).map(publicChatMsg);
+  res.json(msgs);
+});
+
+// Send a message. Requires a verified email; always attributed to the sender.
+app.post("/api/chat", (req, res) => {
+  const { text, sessionToken } = req.body || {};
+  const email = auth.verifySession(sessionToken);
+  if (!email) {
+    return res.status(401).json({ error: "Please verify your email before chatting." });
+  }
+  const body = String(text || "").trim();
+  if (!body) return res.status(400).json({ error: "Message cannot be empty." });
+  if (body.length > 500) {
+    return res.status(400).json({ error: "Message is too long (max 500 characters)." });
+  }
+  const db = loadDB();
+  const msg = {
+    id: id(),
+    text: body,
+    email, // internal, for own-delete authorization; never sent to clients
+    author: nameFromEmail(email),
+    ts: Date.now(),
+  };
+  db.chat.push(msg);
+  // Trim storage to a reasonable cap (keep a little more than we show).
+  if (db.chat.length > CHAT_LIMIT * 3) {
+    db.chat = db.chat.slice(-CHAT_LIMIT * 2);
+  }
+  saveDB(db);
+  broadcast("chat", { id: msg.id });
+  res.status(201).json(publicChatMsg(msg));
+});
+
+// Whether the requester owns a message (for the frontend to show a delete button).
+// POST { sessionToken } -> { ids: [messageIds owned by this email] }
+app.post("/api/chat/mine", (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ ids: [] });
+  const db = loadDB();
+  const ids = db.chat.filter((m) => m.email === email).map((m) => m.id);
+  res.json({ ids });
+});
+
+// Delete a message: allowed if the requester is the author (valid session token
+// matching the message's email) OR an admin (x-admin-key header).
+app.delete("/api/chat/:msgId", (req, res) => {
+  const db = loadDB();
+  const msg = db.chat.find((m) => m.id === req.params.msgId);
+  if (!msg) return res.status(404).json({ error: "Message not found." });
+
+  const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
+  const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
+  const isOwner = requesterEmail && requesterEmail === msg.email;
+
+  if (!isAdmin && !isOwner) {
+    return res.status(403).json({ error: "You can only delete your own messages." });
+  }
+  db.chat = db.chat.filter((m) => m.id !== req.params.msgId);
+  saveDB(db);
+  broadcast("chat", { deleted: req.params.msgId });
   res.json({ ok: true });
 });
 
@@ -563,8 +751,8 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, (req, res) => {
 // Set the live/upcoming status of a match (does not affect the result).
 app.post("/api/admin/matches/:matchId/status", requireAdmin, (req, res) => {
   const { status } = req.body || {};
-  if (!["upcoming", "live"].includes(status)) {
-    return res.status(400).json({ error: "Status must be 'upcoming' or 'live'." });
+  if (!["upcoming", "live", "over"].includes(status)) {
+    return res.status(400).json({ error: "Status must be 'upcoming', 'live', or 'over'." });
   }
   const db = loadDB();
   const match = db.matches.find((m) => m.id === req.params.matchId);
@@ -574,10 +762,24 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, (req, res) => {
       .status(409)
       .json({ error: "This match is finished (has a result). Clear the result first to change status." });
   }
+  const wasLive = match.status === "live";
   match.status = status;
   saveDB(db);
   broadcast("matches", { id: match.id });
-  res.json({ ok: true, match });
+
+  // Only notify on the TRANSITION into live (not if it was already live).
+  let notify = null;
+  if (status === "live" && !wasLive) {
+    const baseUrl =
+      process.env.PUBLIC_URL ||
+      `${req.protocol}://${req.get("host")}`;
+    // Fire-and-forget so the admin response is instant.
+    notifyMatchLive(db, match, baseUrl).catch((e) =>
+      console.error("[notify] error:", e.message)
+    );
+    notify = { queued: true, recipients: db.notifyOptIns.length };
+  }
+  res.json({ ok: true, match, notify });
 });
 
 app.listen(PORT, () => {

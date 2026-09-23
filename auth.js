@@ -168,4 +168,37 @@ function verifySession(token) {
   }
 }
 
-module.exports = { sendOtp, verifyOtp, verifySession, normalizeEmail };
+// Send a "match is live" notification email to a single recipient.
+// Returns { ok } or { ok:false, error }.
+async function sendMatchLiveEmail(toEmail, { title, line, url } = {}) {
+  const from = process.env.MAIL_FROM;
+  try {
+    await transporter().sendMail({
+      from: `CHECKMATE <${from}>`,
+      to: toEmail,
+      subject: `🔴 LIVE: ${title || "A match is now live"} — predict now!`,
+      text: `${line || title} is now LIVE on CHECKMATE. Make your prediction: ${url || ""}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;background:#050608;color:#fff;padding:32px;border-radius:12px;max-width:460px;margin:auto">
+          <h1 style="letter-spacing:2px;margin:0 0 4px">CHECK<span style="color:#e4002b">MATE</span></h1>
+          <p style="color:#9aa3b2;margin:0 0 20px;font-size:13px">The Acevector Chess Tournament</p>
+          <div style="display:inline-block;background:#e4002b;color:#fff;font-weight:800;letter-spacing:1px;padding:6px 14px;border-radius:6px;font-size:13px">🔴 NOW LIVE</div>
+          <p style="font-size:18px;font-weight:800;margin:16px 0 6px">${line || title}</p>
+          <p style="color:#cbd2dd;font-size:14px;margin:0 0 20px">The match has just gone live. Head over and make your prediction before it closes!</p>
+          ${url ? `<a href="${url}" style="display:inline-block;background:#e4002b;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:8px">Predict now</a>` : ""}
+          <p style="color:#6b7078;font-size:12px;margin-top:24px">You're receiving this because you opted in to match notifications. You can opt out any time on the CHECKMATE home page.</p>
+        </div>`,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+module.exports = {
+  sendOtp,
+  verifyOtp,
+  verifySession,
+  normalizeEmail,
+  sendMatchLiveEmail,
+};

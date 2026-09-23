@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Community — CHECKMATE</title>
+  <title>Chat — CHECKMATE</title>
   <link rel="stylesheet" href="/style.css?v=9" />
 </head>
 <body>
@@ -15,9 +15,8 @@
       <nav class="nav">
         <a href="/">Matches</a>
         <a href="/leaderboard.html">Leaderboards</a>
-        <a href="/community.html" class="active">Community</a>
-        <a href="/chat.html">Chat</a>
-
+        <a href="/community.html">Community</a>
+        <a href="/chat.html" class="active">Chat</a>
         <a href="/admin.html">Admin</a>
       </nav>
     </div>
@@ -26,28 +25,25 @@
   <main class="container" style="max-width:640px">
     <div id="verifyBar" class="verify-bar"></div>
     <div style="text-align:center">
-      <span class="section-title">💬 Community</span>
+      <span class="section-title">💬 Global Chat</span>
     </div>
-    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">Cheer for your favourites, share predictions, and talk chess. Posts are reviewed by an admin before appearing.</p>
+    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">Live group chat for everyone. Messages show your name. Updates in real time.</p>
 
-    <div id="pendingNotice" class="pending-notice" style="display:none"></div>
-    <div id="postForm"></div>
-    <div id="posts" class="posts"></div>
+    <div id="chatMessages" class="chat-window"></div>
+    <div id="chatComposer" class="chat-composer"></div>
   </main>
 
   <!-- Email verification modal -->
   <div id="verifyModal" class="modal">
     <div class="modal-card">
       <button class="modal-close" onclick="closeVerify()">×</button>
-      <h3>Verify to Post</h3>
-      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can post. Your name will be shown.</p>
-
+      <h3>Verify to Chat</h3>
+      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can chat. Your name will be shown.</p>
       <div id="stepEmail">
         <label>Snapdeal Email</label>
         <input id="vEmail" type="email" placeholder="you@snapdeal.com" />
         <button id="reqOtpBtn" class="btn" onclick="requestOtp()">Send Code</button>
       </div>
-
       <div id="stepCode" style="display:none">
         <p class="modal-sub">Enter the 6-digit code sent to <strong id="codeSentTo"></strong></p>
         <label>Verification Code</label>
@@ -58,10 +54,10 @@
     </div>
   </div>
 
-  <div class="footer">CHECKMATE · Acevector · Community</div>
+  <div class="footer">CHECKMATE · Acevector · Global Chat</div>
   <div id="toast" class="toast"></div>
 
   <script src="/app.js?v=9"></script>
-  <script>initCommunity();</script>
+  <script>initChat();</script>
 </body>
 </html>
