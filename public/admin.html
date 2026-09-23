@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin — CHECKMATE</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="brand">CHECK<span class="mate">MATE</span>
+        <span class="sub">ADMIN CONTROL</span>
+      </div>
+      <nav class="nav">
+        <a href="/">Matches</a>
+        <a href="/leaderboard.html">Leaderboards</a>
+        <a href="/admin.html" class="active">Admin</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container" style="padding-top:30px">
+    <!-- Login -->
+    <div id="login" class="card" style="max-width:420px;margin:40px auto">
+      <h3>Admin Login</h3>
+      <label>Admin Key</label>
+      <input id="adminKey" type="password" placeholder="Enter admin key" />
+      <button class="btn" onclick="adminLogin()">Enter Control Room</button>
+    </div>
+
+    <!-- Panel -->
+    <div id="panel" style="display:none">
+      <div style="text-align:center"><span class="section-title">Add Player</span></div>
+      <div class="card">
+        <div class="row">
+          <div><label>Player Name</label><input id="pName" placeholder="e.g. Sandeep Singh Sachdeva" /></div>
+          <div><label>Organisation</label><input id="pOrg" placeholder="e.g. Snapdeal" /></div>
+        </div>
+        <button class="btn" onclick="addPlayer()">Add Player</button>
+        <div id="playersList" style="margin-top:18px"></div>
+      </div>
+
+      <div style="text-align:center"><span class="section-title">Add Match</span></div>
+      <div class="card">
+        <div class="row">
+          <div><label>Player A</label><select id="mA"></select></div>
+          <div><label>Player B</label><select id="mB"></select></div>
+        </div>
+        <div class="row">
+          <div><label>Time Slot</label><input id="mTime" placeholder="e.g. 1:30 PM - 2:00 PM" /></div>
+          <div><label>Day</label><input id="mDay" placeholder="Today" value="Today" /></div>
+        </div>
+        <label>Location</label>
+        <input id="mLoc" placeholder="Sky Deck - Tower A" value="Sky Deck - Tower A" />
+        <button class="btn" onclick="addMatch()">Add Match</button>
+      </div>
+
+      <div style="text-align:center"><span class="section-title">Manage Matches & Winners</span></div>
+      <div class="card">
+        <div id="adminMatches"></div>
+      </div>
+
+      <div style="text-align:center;margin-bottom:40px">
+        <button class="btn ghost" onclick="adminLogout()">Log Out</button>
+      </div>
+    </div>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+  <script>initAdmin();</script>
+</body>
+</html>

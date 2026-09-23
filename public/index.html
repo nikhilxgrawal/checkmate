@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CHECKMATE — The Acevector Chess Tournament</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="brand">CHECK<span class="mate">MATE</span>
+        <span class="sub">ACEVECTOR CHESS TOURNAMENT</span>
+      </div>
+      <nav class="nav">
+        <a href="/" class="active">Matches</a>
+        <a href="/leaderboard.html">Leaderboards</a>
+        <a href="/admin.html">Admin</a>
+      </nav>
+    </div>
+  </header>
+
+  <section class="hero">
+    <h1>CHECK<span class="mate">MATE</span></h1>
+    <p class="tagline">Think strategically. Play decisively. <span class="accent">Claim your position.</span></p>
+    <p class="subtitle">The Acevector Chess Tournament</p>
+  </section>
+
+  <main class="container">
+    <div style="text-align:center">
+      <span class="section-title">Today's Matches</span>
+    </div>
+    <div id="matches" class="matches-grid"></div>
+  </main>
+
+  <div class="footer">CHECKMATE · Acevector · Support your champion</div>
+  <div id="toast" class="toast"></div>
+
+  <script src="/app.js"></script>
+  <script>renderMatches();</script>
+</body>
+</html>
