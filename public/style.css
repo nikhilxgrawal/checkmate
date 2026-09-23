@@ -379,6 +379,75 @@ input:focus, select:focus { outline: none; border-color: var(--red); }
   letter-spacing: 1px;
 }
 
+/* ---------- SnapGames: games grid + cards ---------- */
+.brand a { color: inherit; }
+.games-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 20px;
+  margin-bottom: 10px;
+}
+.game-card {
+  display: block;
+  background: linear-gradient(180deg, var(--card-2), var(--card));
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 22px;
+  text-align: center;
+  transition: all 0.15s;
+  position: relative;
+  overflow: hidden;
+}
+.game-card::before {
+  content: "";
+  position: absolute; top: 0; left: 0; right: 0; height: 3px;
+  background: linear-gradient(90deg, var(--red), transparent);
+}
+.game-card:hover { transform: translateY(-3px); border-color: var(--red); box-shadow: 0 10px 30px rgba(0,0,0,0.4); }
+.game-card.has-live { border-color: var(--red); }
+.game-emoji { font-size: 44px; line-height: 1; margin-bottom: 10px; }
+.game-emoji.big { font-size: 54px; margin: 0; }
+.game-name { font-weight: 800; font-size: 20px; letter-spacing: 0.5px; }
+.game-desc { color: var(--muted); font-size: 13px; margin-top: 4px; min-height: 18px; }
+.game-meta { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 14px; }
+.gc-live {
+  background: var(--red); color: #fff; font-size: 12px; font-weight: 700;
+  padding: 4px 10px; border-radius: 20px;
+  animation: livepulse 1.4s ease-in-out infinite;
+}
+.gc-tag {
+  background: var(--bg-2); border: 1px solid var(--line); color: var(--muted);
+  font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;
+}
+
+/* ---------- Stats bar ---------- */
+.stats-bar {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 14px;
+  margin: 4px 0 22px;
+}
+.stats-bar .stat {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 12px; padding: 12px 22px; text-align: center; min-width: 90px;
+}
+.stats-bar .stat-n { font-size: 26px; font-weight: 900; color: var(--red); }
+.stats-bar .stat-l { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+
+/* ---------- Game page header + tabs ---------- */
+.back-link { color: var(--muted); font-size: 14px; font-weight: 600; }
+.back-link:hover { color: #fff; }
+.game-header { display: flex; align-items: center; gap: 18px; margin: 6px 0 18px; }
+.game-title { font-size: 30px; font-weight: 900; letter-spacing: 1px; }
+.game-subtitle { color: var(--muted); font-size: 14px; }
+.tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--line); margin-bottom: 20px; }
+.tab {
+  background: none; border: none; color: var(--muted);
+  font-weight: 700; font-size: 15px; padding: 12px 18px; cursor: pointer;
+  border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.tab:hover { color: #fff; }
+.tab.active { color: #fff; border-bottom-color: var(--red); }
+.tab-note { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 14px; }
+
 @media (max-width: 560px) {
   .row { grid-template-columns: 1fr; }
   .hero { padding-top: 32px; }

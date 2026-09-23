@@ -3,71 +3,58 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>CHECKMATE — The Acevector Chess Tournament</title>
-  <link rel="stylesheet" href="/style.css?v=9" />
+  <title>SnapGames — Play. Predict. Compete.</title>
+  <link rel="stylesheet" href="/style.css?v=10" />
 </head>
 <body>
   <header class="topbar">
     <div class="container topbar-inner">
-      <div class="brand">CHECK<span class="mate">MATE</span>
-        <span class="sub">ACEVECTOR CHESS TOURNAMENT</span>
+      <div class="brand">SNAP<span class="mate">GAMES</span>
+        <span class="sub">PLAY · PREDICT · COMPETE</span>
       </div>
       <nav class="nav">
-        <a href="/" class="active">Matches</a>
-        <a href="/leaderboard.html">Leaderboards</a>
+        <a href="/" class="active">Games</a>
         <a href="/community.html">Community</a>
-        <a href="/chat.html">Chat</a>
-
         <a href="/admin.html">Admin</a>
       </nav>
     </div>
   </header>
 
   <section class="hero">
-    <h1>CHECK<span class="mate">MATE</span></h1>
-    <p class="tagline">Think strategically. Play decisively. <span class="accent">Claim your position.</span></p>
-    <p class="subtitle">The Acevector Chess Tournament</p>
+    <h1>SNAP<span class="mate">GAMES</span></h1>
+    <p class="tagline">Pick your arena. <span class="accent">Predict the winners. Climb the board.</span></p>
+    <p class="subtitle">The Acevector Gaming Arena</p>
   </section>
 
   <main class="container">
     <div id="verifyBar" class="verify-bar"></div>
     <div id="notifyBar" class="notify-bar"></div>
 
-    <section id="section-live">
-      <div style="text-align:center">
-        <span class="section-title">🔴 Current Matches</span>
-      </div>
-      <div id="liveMatches" class="matches-grid"></div>
+    <!-- Stats bar -->
+    <div id="statsBar" class="stats-bar"></div>
+
+    <!-- Live now strip -->
+    <section id="section-livenow" style="display:none">
+      <div style="text-align:center"><span class="section-title">🔴 Live Now</span></div>
+      <div id="liveNow" class="games-grid"></div>
     </section>
 
-    <section id="section-upcoming">
-      <div style="text-align:center">
-        <span class="section-title">🕒 Upcoming Matches</span>
-      </div>
-      <div id="upcomingMatches" class="matches-grid"></div>
-    </section>
-
-    <section id="section-finished">
-      <div style="text-align:center">
-        <span class="section-title">✅ Completed Matches</span>
-      </div>
-      <div id="completedMatches" class="matches-grid"></div>
-    </section>
+    <!-- All games -->
+    <div style="text-align:center"><span class="section-title">🎮 All Games</span></div>
+    <div id="gamesGrid" class="games-grid"></div>
   </main>
 
   <!-- Email verification modal -->
   <div id="verifyModal" class="modal">
     <div class="modal-card">
       <button class="modal-close" onclick="closeVerify()">×</button>
-      <h3>Verify to Predict</h3>
-      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can predict — one prediction per person.</p>
-
+      <h3>Verify your email</h3>
+      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can predict, chat &amp; post.</p>
       <div id="stepEmail">
         <label>Snapdeal Email</label>
         <input id="vEmail" type="email" placeholder="you@snapdeal.com" />
         <button id="reqOtpBtn" class="btn" onclick="requestOtp()">Send Code</button>
       </div>
-
       <div id="stepCode" style="display:none">
         <p class="modal-sub">Enter the 6-digit code sent to <strong id="codeSentTo"></strong></p>
         <label>Verification Code</label>
@@ -78,10 +65,10 @@
     </div>
   </div>
 
-  <div class="footer">CHECKMATE · Acevector · Predict the champion</div>
+  <div class="footer">SnapGames · Acevector · Play. Predict. Compete.</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js?v=9"></script>
+  <script src="/app.js?v=10"></script>
   <script>initHome();</script>
 </body>
 </html>

@@ -1,4 +1,5 @@
 // ---------- Shared helpers ----------
+var CURRENT_GAME_ID = null; // set on the per-game page
 function api(path, opts = {}) {
   return fetch(path, {
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
@@ -142,7 +143,7 @@ async function submitOtp() {
     toast("Email verified! You can now predict, post and chat.", "ok");
     closeVerify();
     renderVerifyBar();
-    if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches();
+    if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches(typeof CURRENT_GAME_ID !== "undefined" ? CURRENT_GAME_ID : undefined);
     if (document.getElementById("postForm")) renderPostForm();
     if (document.getElementById("posts")) renderPosts();
     if (document.getElementById("chatComposer")) { renderChatComposer(); renderChat(true); }
@@ -155,7 +156,7 @@ async function submitOtp() {
 function signOutVoter() {
   clearSession();
   renderVerifyBar();
-  if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches();
+  if (document.getElementById("liveMatches") || document.getElementById("matches")) renderMatches(typeof CURRENT_GAME_ID !== "undefined" ? CURRENT_GAME_ID : undefined);
   if (document.getElementById("postForm")) renderPostForm();
     if (document.getElementById("posts")) renderPosts();
   if (document.getElementById("chatComposer")) { renderChatComposer(); renderChat(false); }
@@ -164,7 +165,7 @@ function signOutVoter() {
 }
 
 // ---------- Public: matches + predictions ----------
-async function renderMatches() {
+async function renderMatches(gameId) {
   renderVerifyBar();
   const containers = {
     live: document.getElementById("liveMatches"),
@@ -175,8 +176,9 @@ async function renderMatches() {
   const legacy = document.getElementById("matches");
   if (!containers.live && !containers.upcoming && !legacy) return;
   try {
+    const matchesUrl = gameId ? `/api/matches?gameId=${encodeURIComponent(gameId)}` : "/api/matches";
     const [matches, serverMine] = await Promise.all([
-      api("/api/matches"),
+      api(matchesUrl),
       isVerified()
         ? api("/api/my-predictions", {
             method: "POST",
@@ -333,29 +335,30 @@ async function predict(matchId, playerId) {
     toast(r && r.autoOptedIn
       ? "Prediction counted! You'll now get an email when matches go live."
       : "Your prediction is counted!", "ok");
-    renderMatches();
+    renderMatches(CURRENT_GAME_ID);
     renderNotifyBar(); // auto-opt-in may have turned notifications on
   } catch (e) {
     if (/verify your email/i.test(e.message)) { clearSession(); openVerify(); }
     if (/already predicted/i.test(e.message)) {
       setMyPrediction(matchId, playerId);
       toast("You've already made your prediction for this match.", "err");
-      renderMatches();
+      renderMatches(CURRENT_GAME_ID);
       return;
     }
     // On any other failure, resync UI with server truth.
-    renderMatches();
+    renderMatches(CURRENT_GAME_ID);
     toast(e.message, "err");
   }
 }
 
 // ---------- Public: leaderboards ----------
-async function renderLeaderboards() {
+async function renderLeaderboards(gameId) {
+  const q = gameId ? `?gameId=${encodeURIComponent(gameId)}` : "";
   try {
     const [winners, predictions, predictors] = await Promise.all([
-      api("/api/leaderboard/winners"),
-      api("/api/leaderboard/predictions"),
-      api("/api/leaderboard/predictors"),
+      api("/api/leaderboard/winners" + q),
+      api("/api/leaderboard/predictions" + q),
+      api("/api/leaderboard/predictors" + q),
     ]);
 
     const wEl = document.getElementById("winners");
@@ -553,24 +556,130 @@ async function setNotify(optIn) {
   }
 }
 
+// ---------- SnapGames: home (games grid + live-now + stats) ----------
+function gameCardHTML(g) {
+  const parts = [];
+  if (g.liveCount) parts.push(`<span class="gc-live">🔴 ${g.liveCount} live</span>`);
+  if (g.upcomingCount) parts.push(`<span class="gc-tag">${g.upcomingCount} upcoming</span>`);
+  if (g.completedCount) parts.push(`<span class="gc-tag">${g.completedCount} done</span>`);
+  if (!parts.length) parts.push(`<span class="gc-tag">No matches yet</span>`);
+  return `
+    <a class="game-card ${g.liveCount ? "has-live" : ""}" href="/game.html?id=${g.id}">
+      <div class="game-emoji">${esc(g.emoji || "🎮")}</div>
+      <div class="game-name">${esc(g.name)}</div>
+      <div class="game-desc">${esc(g.description || "")}</div>
+      <div class="game-meta">${parts.join("")}</div>
+    </a>`;
+}
+
+async function renderStats() {
+  const el = document.getElementById("statsBar");
+  if (!el) return;
+  try {
+    const s = await api("/api/stats");
+    el.innerHTML = `
+      <div class="stat"><div class="stat-n">${s.games}</div><div class="stat-l">Games</div></div>
+      <div class="stat"><div class="stat-n">${s.liveMatches}</div><div class="stat-l">Live now</div></div>
+      <div class="stat"><div class="stat-n">${s.matches}</div><div class="stat-l">Matches</div></div>
+      <div class="stat"><div class="stat-n">${s.predictions}</div><div class="stat-l">Predictions</div></div>
+      <div class="stat"><div class="stat-n">${s.players}</div><div class="stat-l">Players</div></div>`;
+  } catch { /* ignore */ }
+}
+
+async function renderGamesGrid() {
+  const grid = document.getElementById("gamesGrid");
+  if (!grid) return;
+  try {
+    const games = await api("/api/games");
+    grid.innerHTML = games.length
+      ? games.map(gameCardHTML).join("")
+      : '<div class="empty">No games yet. An admin can add games in the Admin panel.</div>';
+
+    // Live-now strip
+    const live = games.filter((g) => g.liveCount > 0);
+    const liveSection = document.getElementById("section-livenow");
+    const liveGrid = document.getElementById("liveNow");
+    if (liveGrid) {
+      if (live.length) {
+        liveGrid.innerHTML = live.map(gameCardHTML).join("");
+        if (liveSection) liveSection.style.display = "";
+      } else if (liveSection) {
+        liveSection.style.display = "none";
+      }
+    }
+  } catch (e) {
+    grid.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
 // ---------- Page bootstrappers ----------
 function initHome() {
-  renderMatches();
+  renderVerifyBar();
   renderNotifyBar();
+  renderStats();
+  renderGamesGrid();
   connectRealtime({
-    predictions: () => renderMatches(),
-    matches: () => renderMatches(),
-    winner: () => renderMatches(),
+    games: () => { renderGamesGrid(); renderStats(); },
+    matches: () => { renderGamesGrid(); renderStats(); },
+    winner: () => { renderGamesGrid(); renderStats(); },
+    predictions: () => renderStats(),
   });
 }
 
-function initLeaderboard() {
-  renderLeaderboards();
-  connectRealtime({
-    predictions: () => renderLeaderboards(),
-    winner: () => renderLeaderboards(),
-    matches: () => renderLeaderboards(),
+// ---------- Per-game page ----------
+
+function gameIdFromUrl() {
+  return new URLSearchParams(location.search).get("id");
+}
+
+async function renderGameHeader() {
+  const el = document.getElementById("gameHeader");
+  if (!el) return;
+  try {
+    const g = await api("/api/games/" + CURRENT_GAME_ID);
+    document.title = `${g.name} — SnapGames`;
+    el.innerHTML = `
+      <div class="game-emoji big">${esc(g.emoji || "🎮")}</div>
+      <div>
+        <h2 class="game-title">${esc(g.name)}</h2>
+        <p class="game-subtitle">${esc(g.description || "")}</p>
+      </div>`;
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function switchTab(name) {
+  ["matches", "standings", "chat"].forEach((t) => {
+    const panel = document.getElementById("tab-" + t);
+    if (panel) panel.style.display = t === name ? "" : "none";
   });
+  document.querySelectorAll(".tab").forEach((b) => {
+    b.classList.toggle("active", b.dataset.tab === name);
+  });
+  if (name === "standings") renderLeaderboards(CURRENT_GAME_ID);
+  if (name === "chat") { renderChatComposer(); renderChat(true); }
+}
+
+function initGame() {
+  CURRENT_GAME_ID = gameIdFromUrl();
+  if (!CURRENT_GAME_ID) { location.href = "/"; return; }
+  renderGameHeader();
+  renderVerifyBar();
+  renderNotifyBar();
+  renderMatches(CURRENT_GAME_ID);
+  connectRealtime({
+    predictions: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
+    matches: () => renderMatches(CURRENT_GAME_ID),
+    winner: () => { renderMatches(CURRENT_GAME_ID); if (isTabVisible("standings")) renderLeaderboards(CURRENT_GAME_ID); },
+    chat: (e) => { if (isTabVisible("chat")) renderChat(true); },
+    games: () => renderGameHeader(),
+  });
+}
+
+function isTabVisible(name) {
+  const p = document.getElementById("tab-" + name);
+  return p && p.style.display !== "none";
 }
 
 function initCommunity() {
@@ -582,7 +691,7 @@ function initCommunity() {
   });
 }
 
-// ---------- Global chat ----------
+// ---------- Per-game chat ----------
 let _chatMineIds = new Set();
 
 function renderChatComposer() {
@@ -623,7 +732,7 @@ async function renderChat(scroll = true) {
   if (!el) return;
   try {
     await refreshChatMine();
-    const msgs = await api("/api/chat");
+    const msgs = await api("/api/chat" + (CURRENT_GAME_ID ? `?gameId=${encodeURIComponent(CURRENT_GAME_ID)}` : ""));
     const isAdmin = !!adminKey();
     if (!msgs.length) {
       el.innerHTML = '<div class="empty">No messages yet. Say hi! 👋</div>';
@@ -658,7 +767,7 @@ async function sendChat() {
   try {
     await api("/api/chat", {
       method: "POST",
-      body: JSON.stringify({ text, sessionToken: getSession().token }),
+      body: JSON.stringify({ text, gameId: CURRENT_GAME_ID, sessionToken: getSession().token }),
     });
     const el = document.getElementById("chatMessages");
     await renderChat(true);
@@ -736,6 +845,7 @@ function showPanel() {
   connectRealtime({
     moderation: () => loadModQueue(),
     matches: () => loadAdminData(),
+    games: () => loadAdminData(),
     predictions: () => {},
   });
 }
@@ -794,11 +904,42 @@ async function rejectPost(postId) {
 }
 
 async function loadAdminData() {
-  const [players, matches] = await Promise.all([
+  const filterSel = document.getElementById("matchGameFilter");
+  const filterGameId = filterSel ? filterSel.value : "";
+  const [games, players, matches] = await Promise.all([
+    api("/api/games"),
     api("/api/players"),
-    api("/api/matches"),
+    api("/api/matches" + (filterGameId ? `?gameId=${encodeURIComponent(filterGameId)}` : "")),
   ]);
+  const gameNameById = {};
+  games.forEach((g) => (gameNameById[g.id] = `${g.emoji || "🎮"} ${g.name}`));
 
+  // Games list
+  const gamesListEl = document.getElementById("gamesList");
+  if (gamesListEl) {
+    gamesListEl.innerHTML = games.length
+      ? games.map((g) => `
+          <div class="list-item">
+            <div><strong>${esc(g.emoji || "🎮")} ${esc(g.name)}</strong>
+              <span style="color:var(--muted)">· ${g.matchCount} match${g.matchCount === 1 ? "" : "es"}${g.liveCount ? " · 🔴 " + g.liveCount + " live" : ""}</span>
+              ${g.description ? `<div style="color:var(--muted);font-size:12px">${esc(g.description)}</div>` : ""}
+            </div>
+            <button class="btn danger" onclick="delGame('${g.id}')">Delete</button>
+          </div>`).join("")
+      : '<div class="empty">No games yet. Add one above.</div>';
+  }
+
+  // Game selectors (add-match + filter)
+  const gameOpts = games.map((g) => `<option value="${g.id}">${esc(g.emoji || "🎮")} ${esc(g.name)}</option>`).join("");
+  const mGame = document.getElementById("mGame");
+  if (mGame) mGame.innerHTML = games.length ? gameOpts : '<option value="">— add a game first —</option>';
+  if (filterSel) {
+    const cur = filterSel.value;
+    filterSel.innerHTML = `<option value="">All games</option>` + gameOpts;
+    filterSel.value = cur;
+  }
+
+  // Players list
   document.getElementById("playersList").innerHTML = players.length
     ? players.map((p) => `
         <div class="list-item">
@@ -814,6 +955,7 @@ async function loadAdminData() {
   document.getElementById("adminMatches").innerHTML = matches.length
     ? matches.map((m) => {
         const resultText = m.isDraw ? " · 🤝 Draw (½–½)" : m.winner ? " · 🏆 " + esc(m.winner.name) : "";
+        const gameTag = gameNameById[m.gameId] ? `<span class="chip ghost" style="margin:0 0 4px">${esc(gameNameById[m.gameId])}</span>` : "";
         const finished = m.status === "finished";
         const statusControl = finished
           ? `<span class="chip win" style="margin:0">✅ Result set</span>`
@@ -825,8 +967,9 @@ async function loadAdminData() {
         return `
         <div class="list-item" style="flex-wrap:wrap;gap:10px">
           <div style="flex:1;min-width:200px">
-            <strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs
-            <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong>
+            ${gameTag}
+            <div><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs
+            <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
             <div style="color:var(--muted);font-size:12px">${esc(m.time || "")} · ${esc(m.day || "")}${resultText}</div>
           </div>
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
@@ -843,6 +986,34 @@ async function loadAdminData() {
         </div>`;
       }).join("")
     : '<div class="empty">No matches yet.</div>';
+}
+
+// ---- Admin: games ----
+async function addGame() {
+  const name = document.getElementById("gName").value.trim();
+  const emoji = document.getElementById("gEmoji").value.trim();
+  const description = document.getElementById("gDesc").value.trim();
+  if (!name) return toast("Game name is required", "err");
+  try {
+    await api("/api/admin/games", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ name, emoji, description }),
+    });
+    document.getElementById("gName").value = "";
+    document.getElementById("gEmoji").value = "";
+    document.getElementById("gDesc").value = "";
+    toast("Game added", "ok");
+    loadAdminData();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function delGame(gameId) {
+  if (!confirm("Delete this game? All its matches, predictions and chat will be removed.")) return;
+  try {
+    await api(`/api/admin/games/${gameId}`, { method: "DELETE", headers: adminHeaders() });
+    toast("Game deleted", "ok");
+    loadAdminData();
+  } catch (e) { toast(e.message, "err"); }
 }
 
 async function setStatus(matchId, status) {
@@ -884,16 +1055,18 @@ async function delPlayer(id) {
 }
 
 async function addMatch() {
+  const gameId = document.getElementById("mGame").value;
   const playerAId = document.getElementById("mA").value;
   const playerBId = document.getElementById("mB").value;
   const time = document.getElementById("mTime").value.trim();
   const day = document.getElementById("mDay").value.trim();
   const location = document.getElementById("mLoc").value.trim();
+  if (!gameId) return toast("Pick a game (add one first if none)", "err");
   if (playerAId === playerBId) return toast("Pick two different players", "err");
   try {
     await api("/api/admin/matches", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ playerAId, playerBId, time, day, location }),
+      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location }),
     });
     document.getElementById("mTime").value = "";
     toast("Match added", "ok");
