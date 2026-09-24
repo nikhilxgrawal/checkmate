@@ -84,8 +84,20 @@ async function sendOtp(rawEmail) {
   });
 
   const from = process.env.MAIL_FROM;
+  // Diagnostic: flag any missing SMTP config (common cause of "no OTP arrives").
+  const missing = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM"].filter(
+    (k) => !process.env[k]
+  );
+  if (missing.length) {
+    console.warn(`[auth] SMTP config missing: ${missing.join(", ")}`);
+  }
+  console.log(
+    `[auth] sending OTP to ${email} via ${process.env.SMTP_HOST}:${
+      process.env.SMTP_PORT || 587
+    } from=${from}`
+  );
   try {
-    await transporter().sendMail({
+    const info = await transporter().sendMail({
       from: `SnapGames <${from}>`,
       to: email,
       subject: `Your SnapGames verification code: ${code}`,
@@ -99,8 +111,22 @@ async function sendOtp(rawEmail) {
           <p style="color:#9aa3b2;font-size:13px">This code expires in 10 minutes. If you didn't request it, ignore this email.</p>
         </div>`,
     });
+    // sendMail resolving does NOT guarantee delivery — the SMTP server may have
+    // accepted the connection but rejected the recipient. Log the outcome so a
+    // silent rejection (e.g. SES sandbox, unverified recipient) is visible.
+    console.log(
+      `[auth] OTP mail result for ${email}: accepted=${JSON.stringify(
+        info.accepted
+      )} rejected=${JSON.stringify(info.rejected)} response=${JSON.stringify(
+        info.response
+      )} id=${info.messageId}`
+    );
+    if (Array.isArray(info.rejected) && info.rejected.length) {
+      console.warn(`[auth] OTP recipient REJECTED by SMTP for ${email}`);
+    }
   } catch (e) {
     otpStore.delete(email);
+    console.error(`[auth] OTP email failed for ${email}:`, e.message);
     return {
       ok: false,
       status: 502,
@@ -109,6 +135,7 @@ async function sendOtp(rawEmail) {
     };
   }
 
+  console.log(`[auth] OTP sent to ${email}`);
   return { ok: true, email };
 }
 
@@ -128,9 +155,11 @@ function verifyOtp(rawEmail, code) {
   }
   entry.attempts += 1;
   if (hashOtp(email, String(code || "").trim()) !== entry.hash) {
+    console.warn(`[auth] OTP verify failed for ${email} (incorrect code)`);
     return { ok: false, status: 401, error: "Incorrect code." };
   }
   otpStore.delete(email);
+  console.log(`[auth] OTP verified for ${email}`);
   return { ok: true, token: issueSession(email), email };
 }
 
@@ -201,4 +230,27 @@ module.exports = {
   verifySession,
   normalizeEmail,
   sendMatchLiveEmail,
+  verifySmtp,
 };
+
+// Verify SMTP connection + auth at startup so bad host/credentials surface
+// immediately instead of only when the first user requests a code.
+async function verifySmtp() {
+  const missing = ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "MAIL_FROM"].filter(
+    (k) => !process.env[k]
+  );
+  if (missing.length) {
+    console.warn(`[auth] SMTP not configured, missing: ${missing.join(", ")}`);
+    return;
+  }
+  try {
+    await transporter().verify();
+    console.log(
+      `[auth] SMTP connection OK (${process.env.SMTP_HOST}:${
+        process.env.SMTP_PORT || 587
+      })`
+    );
+  } catch (e) {
+    console.error("[auth] SMTP verify FAILED:", e.message);
+  }
+}

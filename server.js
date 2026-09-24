@@ -28,6 +28,21 @@ app.use(express.json({
 }));
 app.use(express.static(path.join(__dirname, "public")));
 
+// Lightweight request logger (no dependency). Placed after express.static, so
+// static assets are served above and don't spam the log — only dynamic routes
+// reach here. Logs method, path, final status and duration on response finish.
+app.use((req, res, next) => {
+  const start = Date.now();
+  res.on("finish", () => {
+    console.log(
+      `[req] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${
+        Date.now() - start
+      }ms)`
+    );
+  });
+  next();
+});
+
 // ---------- Data layer (MySQL) ----------
 const pool = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
@@ -258,7 +273,7 @@ function broadcast(event, data = {}) {
 // Wrap async route handlers so thrown errors return 500 instead of hanging.
 function h(fn) {
   return (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
-    console.error("[error]", e.message);
+    console.error(`[error] ${req.method} ${req.originalUrl}:`, e.message);
     if (!res.headersSent) res.status(500).json({ error: "Server error." });
   });
 }
@@ -267,6 +282,7 @@ function h(fn) {
 function requireAdmin(req, res, next) {
   const key = req.header("x-admin-key");
   if (key !== ADMIN_KEY) {
+    console.warn(`[admin] denied ${req.method} ${req.originalUrl} from ${req.ip}`);
     return res.status(401).json({ error: "Unauthorized. Invalid admin key." });
   }
   next();
@@ -1154,6 +1170,34 @@ async function runScheduler() {
   }
 }
 
+// ---------- Keep-alive (prevent free-tier idle spin-down) ----------
+// Pings our own public URL on an interval so the host (e.g. Render free tier)
+// sees inbound traffic and doesn't sleep after ~15 min idle. Only runs when
+// PUBLIC_URL is set (i.e. in production), never locally.
+// ponytail: in-process self-ping. Ceiling: if the service ever DOES spin down
+// (crash/restart during a traffic lull) the timer dies with it and won't wake
+// itself — pair with an external uptime pinger (cron-job.org / UptimeRobot)
+// hitting PUBLIC_URL for a robust guarantee.
+const KEEP_ALIVE_INTERVAL_MS = 10 * 60 * 1000; // 10 min (< the 15 min idle window)
+function startKeepAlive() {
+  const url = process.env.PUBLIC_URL;
+  if (!url) {
+    console.log("[keepalive] disabled (PUBLIC_URL not set)");
+    return;
+  }
+  const client = url.startsWith("https") ? require("https") : require("http");
+  setInterval(() => {
+    const started = Date.now();
+    const req = client.get(url, (res) => {
+      res.resume(); // drain
+      console.log(`[keepalive] ping ${url} -> ${res.statusCode} (${Date.now() - started}ms)`);
+    });
+    req.on("error", (e) => console.error("[keepalive] ping failed:", e.message));
+    req.setTimeout(15000, () => req.destroy(new Error("timeout")));
+  }, KEEP_ALIVE_INTERVAL_MS);
+  console.log(`[keepalive] enabled, pinging ${url} every ${KEEP_ALIVE_INTERVAL_MS / 60000} min`);
+}
+
 // ---------- Startup ----------
 (async () => {
   try {
@@ -1164,6 +1208,8 @@ async function runScheduler() {
   }
   setInterval(runScheduler, SCHEDULER_INTERVAL_MS);
   runScheduler(); // run once at boot
+  auth.verifySmtp(); // log SMTP status at boot (helps diagnose missing OTPs)
+  startKeepAlive();
   app.listen(PORT, () => {
     console.log(`SnapGames server running at http://localhost:${PORT}`);
   });
