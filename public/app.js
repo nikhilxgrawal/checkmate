@@ -351,6 +351,7 @@ function signOutVoter() {
 // ---------- Public: matches + betting ----------
 let MY_BETS = {};      // matchId -> { outcome, stake, settled, payout }
 let MY_BALANCE = null; // current wallet balance (null if unverified)
+let MATCHES_BY_ID = {}; // cache of last-loaded matches (for bid projection)
 
 async function renderMatches(gameId) {
   renderVerifyBar();
@@ -374,6 +375,8 @@ async function renderMatches(gameId) {
     ]);
     MY_BETS = mineRes.bets || {};
     MY_BALANCE = mineRes.balance;
+    MATCHES_BY_ID = {};
+    matches.forEach((m) => (MATCHES_BY_ID[m.id] = m));
     renderWalletBar();
 
     if (legacy && !containers.live) {
@@ -471,6 +474,28 @@ function matchCardHTML(m) {
     : isLive ? "🔴 Live — bidding closed"
     : isOver ? "🏁 Game over — awaiting result"
     : "Bidding closed";
+
+  // "Your bid" summary — shows stake + projected/actual winnings.
+  let myBidBox = "";
+  if (myBet) {
+    const pickLabel = myBet.outcome === "draw" ? "Draw"
+      : myBet.outcome === "A" ? esc(m.playerA ? m.playerA.name : "Player A")
+      : esc(m.playerB ? m.playerB.name : "Player B");
+    if (myBet.settled) {
+      // Match decided — show actual outcome.
+      myBidBox = (myBet.payout > 0)
+        ? `<div class="mybid won">✅ You bid <strong>₹${myBet.stake}</strong> on ${pickLabel} — you won <strong>₹${myBet.payout}</strong> (net +₹${myBet.payout - myBet.stake})</div>`
+        : `<div class="mybid lost">❌ You bid <strong>₹${myBet.stake}</strong> on ${pickLabel} — didn't win (−₹${myBet.stake})</div>`;
+    } else {
+      // Still open/live — show live projected payout from the current pool.
+      const proj = projectedPayout(m, myBet.outcome, myBet.stake);
+      const gain = proj - myBet.stake;
+      myBidBox = `<div class="mybid">🎯 You bid <strong>₹${myBet.stake}</strong> on ${pickLabel}` +
+        ` · Projected win <strong>≈ ₹${proj}</strong>${gain > 0 ? ` (+₹${gain})` : ""}` +
+        `<span class="mybid-note">estimate — changes as more bids come in</span></div>`;
+    }
+  }
+
   return `
   <div class="match-card ${isLive ? "is-live" : ""} ${isOver ? "is-over" : ""}">
     <div class="match-meta">
@@ -496,8 +521,19 @@ function matchCardHTML(m) {
       <div class="d" style="width:${pctD}%"></div>
       <div class="b" style="width:${pctB}%"></div>
     </div>
+    ${myBidBox}
     <div class="predict-hint">${hint}</div>
   </div>`;
+}
+
+// Pari-mutuel projected payout if `outcome` wins right now, for a stake already
+// in the pool: (stake / pool-on-outcome) * total-pool, rounded.
+function projectedPayout(m, outcome, stake) {
+  const pool = m.pool || { A: 0, B: 0, draw: 0 };
+  const onOutcome = pool[outcome] || 0;
+  const total = m.poolTotal || 0;
+  if (onOutcome <= 0 || total <= 0) return stake; // no counter-bets yet -> get stake back
+  return Math.floor((stake / onOutcome) * total);
 }
 
 // Open the styled bid modal for a chosen outcome.
@@ -517,8 +553,28 @@ function openBet(matchId, outcome, label) {
   const input = document.getElementById("bidAmount");
   input.value = "";
   document.getElementById("bidError").textContent = "";
+  updateBidProjection();
+  input.oninput = updateBidProjection;
   modal.style.display = "flex";
   setTimeout(() => input.focus(), 50);
+}
+
+// Show a live projected payout in the modal as the user types a stake.
+function updateBidProjection() {
+  const el = document.getElementById("bidProjection");
+  if (!el || !_pendingBid) return;
+  const stake = Math.floor(Number(document.getElementById("bidAmount").value));
+  const m = MATCHES_BY_ID[_pendingBid.matchId];
+  if (!m || !Number.isFinite(stake) || stake < 1) { el.textContent = ""; return; }
+  // Project as if this stake were added to the pool now.
+  const pool = m.pool || { A: 0, B: 0, draw: 0 };
+  const total = (m.poolTotal || 0) + stake;
+  const onOutcome = (pool[_pendingBid.outcome] || 0) + stake;
+  const proj = onOutcome > 0 ? Math.floor((stake / onOutcome) * total) : stake;
+  const gain = proj - stake;
+  el.innerHTML = `If ${esc(_pendingBid.label)} wins, you'd get <strong>≈ ₹${proj}</strong>` +
+    `${gain > 0 ? ` <span style="color:#3fbf6f">(+₹${gain})</span>` : ""}` +
+    `<br><span class="mybid-note">estimate — final payout depends on all bids at match start</span>`;
 }
 
 function closeBid() {
@@ -551,6 +607,7 @@ function setBidAmount(v) {
   if (!input) return;
   input.value = v === "max" ? MY_BALANCE : v;
   document.getElementById("bidError").textContent = "";
+  updateBidProjection();
   input.focus();
 }
 

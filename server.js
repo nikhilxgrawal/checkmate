@@ -1297,8 +1297,36 @@ function startKeepAlive() {
 }
 
 // ---------- Startup ----------
+
+// Lightweight migration: add any columns the code expects but an older
+// deployed DB may lack. CREATE TABLE IF NOT EXISTS does NOT add columns to an
+// existing table, so column additions (e.g. resultEmailedAt) must be applied
+// here — otherwise saveDB's INSERT fails and every write returns 500.
+async function ensureColumns() {
+  const wanted = [
+    { table: "matches", column: "startAt", ddl: "BIGINT DEFAULT NULL" },
+    { table: "matches", column: "endAt", ddl: "BIGINT DEFAULT NULL" },
+    { table: "matches", column: "resultEmailedAt", ddl: "BIGINT DEFAULT NULL" },
+  ];
+  for (const w of wanted) {
+    try {
+      const [rows] = await pool.query(
+        "SELECT COUNT(*) AS c FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?",
+        [w.table, w.column]
+      );
+      if (rows[0].c === 0) {
+        await pool.query(`ALTER TABLE \`${w.table}\` ADD COLUMN \`${w.column}\` ${w.ddl}`);
+        console.log(`[migrate] added ${w.table}.${w.column}`);
+      }
+    } catch (e) {
+      console.error(`[migrate] ${w.table}.${w.column} failed:`, e.message);
+    }
+  }
+}
+
 (async () => {
   try {
+    await ensureColumns();
     await seedIfEmpty();
   } catch (e) {
     console.error("[startup] seed/DB error:", e.message);

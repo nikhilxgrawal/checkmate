@@ -935,6 +935,33 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 .bet-tag.mine-tag { background: #4a4f57; }
 .bet-tag.won-tag { background: var(--gold); color: #1a1300; }
 
+/* ---------- "Your bid" summary on match cards ---------- */
+.mybid {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(63, 111, 209, 0.12);
+  border: 1px solid rgba(63, 111, 209, 0.4);
+  font-size: 14px;
+}
+.mybid.won { background: rgba(63, 191, 111, 0.12); border-color: rgba(63, 191, 111, 0.45); }
+.mybid.lost { background: rgba(228, 0, 43, 0.10); border-color: rgba(228, 0, 43, 0.4); }
+.mybid strong { color: var(--white); }
+.mybid-note { display: block; color: var(--muted); font-size: 11px; margin-top: 3px; }
+
+/* Live projected payout inside the bid modal */
+.bid-projection {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(63, 191, 111, 0.10);
+  border: 1px solid rgba(63, 191, 111, 0.35);
+  font-size: 13px;
+  min-height: 0;
+}
+.bid-projection:empty { display: none; }
+.bid-projection strong { color: var(--white); }
+
 /* ---------- Community posts ---------- */
 .post-compose {
   background: linear-gradient(180deg, var(--card-2), var(--card));
