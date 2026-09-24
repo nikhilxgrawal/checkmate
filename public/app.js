@@ -1045,8 +1045,13 @@ async function renderChat(scroll = true) {
   const el = document.getElementById("chatMessages");
   if (!el) return;
   try {
-    await refreshChatMine();
-    const msgs = await api("/api/chat" + (CURRENT_GAME_ID ? `?gameId=${encodeURIComponent(CURRENT_GAME_ID)}` : ""));
+    // Fetch "which messages are mine" and the message list concurrently so the
+    // chat loads in a single round-trip and paints once (was two sequential
+    // requests, which looked like the panel refreshing twice).
+    const [, msgs] = await Promise.all([
+      refreshChatMine(),
+      api("/api/chat" + (CURRENT_GAME_ID ? `?gameId=${encodeURIComponent(CURRENT_GAME_ID)}` : "")),
+    ]);
     const isAdmin = !!adminKey();
     if (!msgs.length) {
       el.innerHTML = '<div class="empty">No messages yet. Say hi! 👋</div>';
