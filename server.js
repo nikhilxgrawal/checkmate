@@ -52,6 +52,23 @@ const pool = mysql.createPool({
       : undefined,
 });
 
+// Diagnostic: show what DB the app actually resolved (never logs the password).
+console.log(
+  `[db] host=${process.env.DB_HOST || "localhost"} port=${Number(
+    process.env.DB_PORT || 3306
+  )} user=${process.env.DB_USER || "root"} database=${
+    process.env.DB_NAME || "checkmate"
+  } ssl=${process.env.DB_SSL === "true"}`
+);
+// Confirm which schema the connection lands in (TiDB defaults to `sys` if
+// DB_NAME is unset/wrong). This tells us the real DEFAULT database.
+pool
+  .query("SELECT DATABASE() AS db, CURRENT_USER() AS who")
+  .then(([rows]) =>
+    console.log(`[db] connected default_database=${rows[0].db} as=${rows[0].who}`)
+  )
+  .catch((e) => console.error("[db] probe failed:", e.message));
+
 function id() {
   return crypto.randomBytes(8).toString("hex");
 }
