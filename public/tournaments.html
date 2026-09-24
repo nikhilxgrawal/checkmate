@@ -3,19 +3,19 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SnapGames — Play. Predict. Compete.</title>
+  <title>Tournaments — SnapGames</title>
   <link rel="stylesheet" href="/style.css?v=33" />
 </head>
 <body>
   <header class="topbar">
     <div class="container topbar-inner">
-      <div class="brand">SNAP<span class="mate">GAMES</span>
-        <span class="sub">PLAY · PREDICT · COMPETE</span>
+      <div class="brand"><a href="/">SNAP<span class="mate">GAMES</span></a>
+        <span class="sub">TOURNAMENTS</span>
       </div>
       <nav class="nav">
         <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
-        <a href="/" class="active">Games</a>
-        <a href="/tournaments.html">Tournaments</a>
+        <a href="/">Games</a>
+        <a href="/tournaments.html" class="active">Tournaments</a>
         <a href="/profiles.html">Profiles</a>
         <a href="/community.html">Community</a>
         <a href="/admin.html">Admin</a>
@@ -24,28 +24,15 @@
     </div>
   </header>
 
-  <section class="hero">
-    <h1>SNAP<span class="mate">GAMES</span></h1>
-    <p class="tagline">Pick your arena. <span class="accent">Predict the winners. Climb the board.</span></p>
-    <p class="subtitle">The Acevector Gaming Arena</p>
-  </section>
-
-  <main class="container">
+  <main class="container" style="max-width:820px">
     <div id="verifyBar" class="verify-bar"></div>
-    <div id="notifyBar" class="notify-bar"></div>
-
-    <!-- Stats bar -->
-    <div id="statsBar" class="stats-bar"></div>
-
-    <!-- Live now strip -->
-    <section id="section-livenow" style="display:none">
-      <div style="text-align:center"><span class="section-title">🔴 Live Now</span></div>
-      <div id="liveNow" class="games-grid"></div>
-    </section>
-
-    <!-- All games -->
-    <div style="text-align:center"><span class="section-title">🎮 All Games</span></div>
-    <div id="gamesGrid" class="games-grid"></div>
+    <div style="text-align:center">
+      <span class="section-title">🏆 Tournaments</span>
+    </div>
+    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">
+      Register for a tournament while its registration window is open. Track your results and position in your profile.
+    </p>
+    <div id="tournaments" class="tournaments-grid"></div>
   </main>
 
   <!-- Email verification modal -->
@@ -53,7 +40,7 @@
     <div class="modal-card">
       <button class="modal-close" onclick="closeVerify()">×</button>
       <h3>Verify your email</h3>
-      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can predict, chat &amp; post.</p>
+      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can register &amp; take part.</p>
       <div id="stepEmail">
         <label>Snapdeal Email</label>
         <input id="vEmail" type="email" placeholder="you@snapdeal.com" />
@@ -69,10 +56,10 @@
     </div>
   </div>
 
-  <div class="footer">SnapGames · Acevector · Play. Predict. Compete.</div>
+  <div class="footer">SnapGames · Acevector · Tournaments</div>
   <div id="toast" class="toast"></div>
 
   <script src="/app.js?v=33"></script>
-  <script>initHome();</script>
+  <script>initTournaments();</script>
 </body>
 </html>

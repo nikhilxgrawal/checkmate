@@ -5,3 +5,7 @@ nohup.out
 .DS_Store
 .env
 .idea/
+
+# Local screenshots / scratch (never deploy these)
+*.heic
+*.HEIC

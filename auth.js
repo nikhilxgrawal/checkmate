@@ -38,7 +38,17 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+// Runtime override of the allowed domains (managed from the admin panel and
+// persisted in the DB by server.js). When null, we fall back to the env var.
+let _allowedDomainsOverride = null;
+function setAllowedDomains(list) {
+  _allowedDomainsOverride = Array.isArray(list)
+    ? list.map((d) => String(d || "").trim().toLowerCase()).filter(Boolean)
+    : null;
+}
+
 function allowedDomains() {
+  if (_allowedDomainsOverride) return _allowedDomainsOverride;
   return (process.env.ALLOWED_EMAIL_DOMAINS || "")
     .split(",")
     .map((d) => d.trim().toLowerCase())
@@ -50,6 +60,21 @@ function isDomainAllowed(email) {
   if (domains.length === 0) return true; // no restriction
   const domain = email.split("@")[1];
   return domains.includes(domain);
+}
+
+// The "org" is the first label of the email domain:
+//   g.siva@unicommerce.com -> "unicommerce",  a@snapdeal.com -> "snapdeal".
+function orgFromEmail(email) {
+  const domain = String(email || "").split("@")[1] || "";
+  return (domain.split(".")[0] || "").toLowerCase();
+}
+
+// Central list of allowed orgs, derived from ALLOWED_EMAIL_DOMAINS. Empty when
+// no domain restriction is configured (any domain allowed).
+function allowedOrgs() {
+  return allowedDomains()
+    .map((d) => (d.split(".")[0] || "").toLowerCase())
+    .filter(Boolean);
 }
 
 function hashOtp(email, code) {
@@ -90,6 +115,17 @@ async function sendOtp(rawEmail) {
     attempts: 0,
     lastSentAt: Date.now(),
   });
+
+  // DEV-ONLY: when OTP_DEV_ECHO=true, print the code to the server console and
+  // skip sending email entirely. This lets you test the login/verify flow
+  // locally without SMTP. NEVER enable this in production — it exposes codes.
+  if (process.env.OTP_DEV_ECHO === "true") {
+    console.log(
+      `\n[auth][DEV] OTP for ${email} is ${code}  ` +
+      `(OTP_DEV_ECHO enabled — email sending skipped; do NOT use in production)\n`
+    );
+    return { ok: true, email };
+  }
 
   const from = process.env.MAIL_FROM;
   // Diagnostic: flag any missing SMTP config (common cause of "no OTP arrives").
@@ -239,6 +275,10 @@ module.exports = {
   normalizeEmail,
   sendMatchLiveEmail,
   verifySmtp,
+  orgFromEmail,
+  allowedOrgs,
+  allowedDomains,
+  setAllowedDomains,
 };
 
 // Verify SMTP connection + auth at startup so bad host/credentials surface
