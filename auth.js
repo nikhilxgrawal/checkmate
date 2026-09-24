@@ -11,10 +11,18 @@ const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 const otpStore = new Map();
 
 function transporter() {
+  const port = Number(process.env.SMTP_PORT || 587);
   return nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: false, // STARTTLS on 587
+    port,
+    secure: port === 465, // 465 = implicit TLS; 587 = STARTTLS
+    requireTLS: port !== 465,
+    // Without these, a blocked/stalled outbound SMTP connection hangs forever
+    // (the symptom we saw: log stops at "sending OTP", no result, no error).
+    // These force a fast, logged failure instead.
+    connectionTimeout: 10000, // TCP connect
+    greetingTimeout: 10000, // wait for server 220 greeting
+    socketTimeout: 20000, // inactivity after connect
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASSWORD,
