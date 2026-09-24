@@ -1199,18 +1199,15 @@ async function addMatch() {
   const time = document.getElementById("mTime").value.trim();
   const day = document.getElementById("mDay").value.trim();
   const location = document.getElementById("mLoc").value.trim();
-  const startAtEl = document.getElementById("mStartAt");
-  const startAt = startAtEl && startAtEl.value ? startAtEl.value : null; // "YYYY-MM-DDTHH:MM"
   if (!gameId) return toast("Pick a game (add one first if none)", "err");
   if (playerAId === playerBId) return toast("Pick two different players", "err");
   try {
     await api("/api/admin/matches", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location, startAt }),
+      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location }),
     });
     document.getElementById("mTime").value = "";
-    if (startAtEl) startAtEl.value = "";
-    toast(startAt ? "Match added — will auto go-live at set time" : "Match added", "ok");
+    toast("Match added", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
 }

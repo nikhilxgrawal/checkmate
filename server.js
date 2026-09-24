@@ -1149,57 +1149,6 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, h(async (req, res) 
   });
 }));
 
-// ---------- Time-based auto-status scheduler ----------
-// Every 20s: flip upcoming->live at startAt (fires notification + closes bids),
-// and live->over at endAt. Only acts on matches with the timestamps set and not
-// already decided; manual admin actions still take precedence.
-const SCHEDULER_INTERVAL_MS = 20 * 1000;
-let schedulerRunning = false;
-
-async function runScheduler() {
-  if (schedulerRunning) return; // avoid overlap
-  schedulerRunning = true;
-  try {
-    const now = Date.now();
-    // Run the state flip under the same write lock as bids/settlement so the
-    // scheduler and a concurrent bid/admin action can't clobber each other.
-    // ponytail: mutateDB always re-saves the full dataset, so this rewrites the
-    // tables every 20s even with no changes — negligible at this scale (a few
-    // matches); revisit if the match count ever grows large.
-    const { db, changed, wentLive } = await mutateDB(async (db) => {
-      let changed = false;
-      const wentLive = [];
-      for (const m of db.matches) {
-        if (isDecided(m)) continue;
-        if (m.status === "upcoming" && m.startAt && now >= m.startAt) {
-          m.status = "live";
-          changed = true;
-          wentLive.push(m);
-        } else if (m.status === "live" && m.endAt && now >= m.endAt) {
-          m.status = "over";
-          changed = true;
-        }
-      }
-      return { db, changed, wentLive };
-    });
-    if (changed) {
-      broadcast("matches", {});
-      broadcast("games", {});
-      // Fire live notifications for matches that just auto-went-live.
-      const baseUrl = process.env.PUBLIC_URL || `http://localhost:${PORT}`;
-      for (const m of wentLive) {
-        broadcast("winner", { matchId: m.id }); // nudge clients (bids closed)
-        notifyMatchLive(db, m, baseUrl).catch((e) => console.error("[scheduler notify]", e.message));
-        console.log(`[scheduler] match ${m.id} auto -> live`);
-      }
-    }
-  } catch (e) {
-    console.error("[scheduler] error:", e.message);
-  } finally {
-    schedulerRunning = false;
-  }
-}
-
 // ---------- Keep-alive (prevent free-tier idle spin-down) ----------
 // Pings our own public URL on an interval so the host (e.g. Render free tier)
 // sees inbound traffic and doesn't sleep after ~15 min idle. Only runs when
@@ -1236,8 +1185,6 @@ function startKeepAlive() {
     console.error("[startup] seed/DB error:", e.message);
     console.error("Ensure MySQL is running and schema.sql has been loaded.");
   }
-  setInterval(runScheduler, SCHEDULER_INTERVAL_MS);
-  runScheduler(); // run once at boot
   auth.verifySmtp(); // log SMTP status at boot (helps diagnose missing OTPs)
   startKeepAlive();
   app.listen(PORT, () => {
