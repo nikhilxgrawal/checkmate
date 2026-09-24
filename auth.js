@@ -139,7 +139,6 @@ async function sendOtp(rawEmail) {
       ok: false,
       status: 502,
       error: "Could not send the verification email. Try again.",
-      detail: e.message,
     };
   }
 

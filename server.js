@@ -201,8 +201,12 @@ let writeChain = Promise.resolve();
 function mutateDB(fn) {
   const run = writeChain.then(async () => {
     const db = await loadDB();
-    const result = await fn(db);
-    await saveDB(db);
+    // Default: assume the callback mutated `db` and needs persisting. A callback
+    // that early-returns without changing anything can call ctx.markClean() to
+    // skip the (expensive) full-dataset rewrite in saveDB.
+    let dirty = true;
+    const result = await fn(db, { markClean: () => { dirty = false; } });
+    if (dirty) await saveDB(db);
     return result;
   });
   // Keep the chain alive even if this mutation throws.
@@ -280,8 +284,11 @@ function h(fn) {
 
 // ---------- Helpers ----------
 function requireAdmin(req, res, next) {
-  const key = req.header("x-admin-key");
-  if (key !== ADMIN_KEY) {
+  const key = req.header("x-admin-key") || "";
+  // Constant-time compare to avoid leaking the key length/prefix via timing.
+  const a = Buffer.from(key);
+  const b = Buffer.from(ADMIN_KEY);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
     console.warn(`[admin] denied ${req.method} ${req.originalUrl} from ${req.ip}`);
     return res.status(401).json({ error: "Unauthorized. Invalid admin key." });
   }
@@ -564,23 +571,30 @@ app.post("/api/matches/:matchId/bid", h(async (req, res) => {
   if (MAX_BID > 0 && amt > MAX_BID) {
     return res.status(400).json({ error: `Bid cannot exceed ₹${MAX_BID}.` });
   }
-  await mutateDB(async (db) => {
+  // Mutate first, then respond/broadcast only AFTER the write is committed, so
+  // a failed saveDB never leaves the client thinking the bid succeeded.
+  const out = await mutateDB(async (db, { markClean }) => {
     const match = db.matches.find((m) => m.id === req.params.matchId);
-    if (!match) return res.status(404).json({ error: "Match not found." });
+    if (!match) {
+      markClean();
+      return { status: 404, body: { error: "Match not found." } };
+    }
     if (!biddingOpen(match)) {
+      markClean();
       const s = effectiveStatus(match);
-      return res.status(409).json({
-        error: s === "live" ? "This match is live — bidding is closed."
-          : s === "over" ? "This match is over — bidding is closed."
-          : "Bidding is closed for this match.",
-      });
+      return { status: 409, body: { error:
+        s === "live" ? "This match is live — bidding is closed."
+        : s === "over" ? "This match is over — bidding is closed."
+        : "Bidding is closed for this match." } };
     }
     if (db.bids.find((b) => b.matchId === match.id && b.email === email)) {
-      return res.status(409).json({ error: "You already placed a bid on this match." });
+      markClean();
+      return { status: 409, body: { error: "You already placed a bid on this match." } };
     }
     const balance = getBalance(db, email);
     if (amt > balance) {
-      return res.status(400).json({ error: `Not enough balance. You have ₹${balance}.` });
+      markClean();
+      return { status: 400, body: { error: `Not enough balance. You have ₹${balance}.` } };
     }
     db.wallets[email] = balance - amt;
     db.bids.push({
@@ -588,9 +602,14 @@ app.post("/api/matches/:matchId/bid", h(async (req, res) => {
       outcome, stake: amt, ts: Date.now(), settled: false, payout: 0,
     });
     addOptIn(db, email);
-    broadcast("bids", { matchId: match.id, gameId: match.gameId });
-    res.status(201).json({ ok: true, balance: db.wallets[email] });
+    return {
+      status: 201,
+      body: { ok: true, balance: db.wallets[email] },
+      broadcast: { event: "bids", data: { matchId: match.id, gameId: match.gameId } },
+    };
   });
+  if (out.broadcast) broadcast(out.broadcast.event, out.broadcast.data);
+  res.status(out.status).json(out.body);
 }));
 
 // The verified user's own bids: { matchId: { outcome, stake, settled, payout } } + balance.
@@ -1073,12 +1092,16 @@ app.delete("/api/admin/matches/:matchId", requireAdmin, h(async (req, res) => {
 app.post("/api/admin/matches/:matchId/winner", requireAdmin, h(async (req, res) => {
   const body = req.body || {};
   const result = body.result !== undefined ? body.result : body.winnerId;
-  await mutateDB(async (db) => {
+  const out = await mutateDB(async (db, { markClean }) => {
     const match = db.matches.find((m) => m.id === req.params.matchId);
-    if (!match) return res.status(404).json({ error: "Match not found." });
+    if (!match) {
+      markClean();
+      return { status: 404, body: { error: "Match not found." } };
+    }
     const val = result || null;
     if (val && val !== "draw" && val !== match.playerAId && val !== match.playerBId) {
-      return res.status(400).json({ error: "Result must be one of the two players or a draw." });
+      markClean();
+      return { status: 400, body: { error: "Result must be one of the two players or a draw." } };
     }
     if (isDecided(match)) unsettleMatch(db, match); // reverse before re-applying
     match.result = val;
@@ -1087,11 +1110,18 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, h(async (req, res) 
     else if (match.status === "finished") match.status = "upcoming";
     let settlement = null;
     if (val) settlement = settleMatch(db, match);
-    broadcast("winner", { matchId: match.id, result: match.result });
-    broadcast("bids", { matchId: match.id, gameId: match.gameId });
-    broadcast("matches", { id: match.id });
-    res.json({ ok: true, match, settlement });
+    return {
+      status: 200,
+      body: { ok: true, match, settlement },
+      broadcasts: [
+        { event: "winner", data: { matchId: match.id, result: match.result } },
+        { event: "bids", data: { matchId: match.id, gameId: match.gameId } },
+        { event: "matches", data: { id: match.id } },
+      ],
+    };
   });
+  if (out.broadcasts) out.broadcasts.forEach((b) => broadcast(b.event, b.data));
+  res.status(out.status).json(out.body);
 }));
 
 // Set live/upcoming/over status (does not affect result).
