@@ -9,7 +9,12 @@ const auth = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || "acevector2026";
+const ADMIN_KEY = process.env.ADMIN_KEY;
+if (!ADMIN_KEY) {
+  console.error("[fatal] ADMIN_KEY is not set. Refusing to start without an admin key.");
+  console.error("Set it in .env (local) or your host's environment: ADMIN_KEY=your-secret");
+  process.exit(1);
+}
 const STARTING_BALANCE = Number(process.env.STARTING_BALANCE || 10000);
 // MAX_BID = 0 (or unset) means no cap — a user may bid up to their balance.
 const MAX_BID = Number(process.env.MAX_BID || 0);
@@ -34,6 +39,17 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME || "checkmate",
   waitForConnections: true,
   connectionLimit: 10,
+  // Managed/free MySQL hosts (TiDB Cloud, Aiven, etc.) require TLS. Enable with
+  // DB_SSL=true. Providers whose cert chains to a public CA (e.g. TiDB Cloud)
+  // need no cert file; for a private CA, pass the PEM in DB_CA.
+  ssl:
+    process.env.DB_SSL === "true"
+      ? {
+          minVersion: "TLSv1.2",
+          rejectUnauthorized: true,
+          ...(process.env.DB_CA ? { ca: process.env.DB_CA } : {}),
+        }
+      : undefined,
 });
 
 function id() {
@@ -138,6 +154,28 @@ async function saveDB(db) {
   } finally {
     conn.release();
   }
+}
+
+// ponytail: global in-process write lock. Every mutation here is a
+// load-all -> mutate-in-JS -> save-all sequence; without serialization two
+// concurrent writers (e.g. two people bidding on a live match at once, or a
+// bid landing while the scheduler fires) both start from the same snapshot and
+// the last save silently clobbers the other's change — including wallet
+// balances. mutateDB() runs load+mutate+save under a single promise chain so
+// those sequences can't interleave. Ceiling: single process only. If this ever
+// runs multi-instance or under real load, move to per-row SQL + transactions
+// with SELECT ... FOR UPDATE on the wallet row.
+let writeChain = Promise.resolve();
+function mutateDB(fn) {
+  const run = writeChain.then(async () => {
+    const db = await loadDB();
+    const result = await fn(db);
+    await saveDB(db);
+    return result;
+  });
+  // Keep the chain alive even if this mutation throws.
+  writeChain = run.then(() => {}, () => {});
+  return run;
 }
 
 // Seed the tournament data if the DB is empty.
@@ -453,11 +491,11 @@ app.post("/api/auth/verify-otp", h(async (req, res) => {
   // Auto opt-in to match notifications on successful login/verification.
   let optedIn = false;
   try {
-    const db = await loadDB();
-    const added = addOptIn(db, result.email);
-    getBalance(db, result.email); // ensure a wallet exists on first login
-    if (added || db.wallets[result.email] !== undefined) await saveDB(db);
-    optedIn = isOptedIn(db, result.email);
+    optedIn = await mutateDB(async (db) => {
+      addOptIn(db, result.email);
+      getBalance(db, result.email); // ensure a wallet exists on first login
+      return isOptedIn(db, result.email);
+    });
   } catch (e) {
     console.error("[verify-otp] opt-in error:", e.message);
   }
@@ -473,9 +511,7 @@ app.post("/api/auth/verify-otp", h(async (req, res) => {
 app.post("/api/wallet", h(async (req, res) => {
   const email = auth.verifySession((req.body || {}).sessionToken);
   if (!email) return res.json({ verified: false, balance: null });
-  const db = await loadDB();
-  const balance = getBalance(db, email);
-  await saveDB(db); // persist wallet init to STARTING_BALANCE on first access
+  const balance = await mutateDB(async (db) => getBalance(db, email));
   res.json({ verified: true, email, balance });
 }));
 
@@ -495,33 +531,33 @@ app.post("/api/matches/:matchId/bid", h(async (req, res) => {
   if (MAX_BID > 0 && amt > MAX_BID) {
     return res.status(400).json({ error: `Bid cannot exceed ₹${MAX_BID}.` });
   }
-  const db = await loadDB();
-  const match = db.matches.find((m) => m.id === req.params.matchId);
-  if (!match) return res.status(404).json({ error: "Match not found." });
-  if (!biddingOpen(match)) {
-    const s = effectiveStatus(match);
-    return res.status(409).json({
-      error: s === "live" ? "This match is live — bidding is closed."
-        : s === "over" ? "This match is over — bidding is closed."
-        : "Bidding is closed for this match.",
+  await mutateDB(async (db) => {
+    const match = db.matches.find((m) => m.id === req.params.matchId);
+    if (!match) return res.status(404).json({ error: "Match not found." });
+    if (!biddingOpen(match)) {
+      const s = effectiveStatus(match);
+      return res.status(409).json({
+        error: s === "live" ? "This match is live — bidding is closed."
+          : s === "over" ? "This match is over — bidding is closed."
+          : "Bidding is closed for this match.",
+      });
+    }
+    if (db.bids.find((b) => b.matchId === match.id && b.email === email)) {
+      return res.status(409).json({ error: "You already placed a bid on this match." });
+    }
+    const balance = getBalance(db, email);
+    if (amt > balance) {
+      return res.status(400).json({ error: `Not enough balance. You have ₹${balance}.` });
+    }
+    db.wallets[email] = balance - amt;
+    db.bids.push({
+      id: id(), matchId: match.id, gameId: match.gameId, email,
+      outcome, stake: amt, ts: Date.now(), settled: false, payout: 0,
     });
-  }
-  if (db.bids.find((b) => b.matchId === match.id && b.email === email)) {
-    return res.status(409).json({ error: "You already placed a bid on this match." });
-  }
-  const balance = getBalance(db, email);
-  if (amt > balance) {
-    return res.status(400).json({ error: `Not enough balance. You have ₹${balance}.` });
-  }
-  db.wallets[email] = balance - amt;
-  db.bids.push({
-    id: id(), matchId: match.id, gameId: match.gameId, email,
-    outcome, stake: amt, ts: Date.now(), settled: false, payout: 0,
+    addOptIn(db, email);
+    broadcast("bids", { matchId: match.id, gameId: match.gameId });
+    res.status(201).json({ ok: true, balance: db.wallets[email] });
   });
-  addOptIn(db, email);
-  await saveDB(db);
-  broadcast("bids", { matchId: match.id, gameId: match.gameId });
-  res.status(201).json({ ok: true, balance: db.wallets[email] });
 }));
 
 // The verified user's own bids: { matchId: { outcome, stake, settled, payout } } + balance.
@@ -548,10 +584,11 @@ app.post("/api/notifications/set", h(async (req, res) => {
   const { sessionToken, optIn } = req.body || {};
   const email = auth.verifySession(sessionToken);
   if (!email) return res.status(401).json({ error: "Please verify your email to change notifications." });
-  const db = await loadDB();
-  if (optIn) addOptIn(db, email); else removeOptIn(db, email);
-  await saveDB(db);
-  res.json({ ok: true, optedIn: isOptedIn(db, email) });
+  const optedIn = await mutateDB(async (db) => {
+    if (optIn) addOptIn(db, email); else removeOptIn(db, email);
+    return isOptedIn(db, email);
+  });
+  res.json({ ok: true, optedIn });
 }));
 
 // ---- Leaderboards ----
@@ -657,13 +694,11 @@ app.post("/api/posts", h(async (req, res) => {
   const body = String(text || "").trim();
   if (!body) return res.status(400).json({ error: "Post cannot be empty." });
   if (body.length > 500) return res.status(400).json({ error: "Post is too long (max 500 characters)." });
-  const db = await loadDB();
   const post = {
     id: id(), text: body, email, author: nameFromEmail(email),
     anonymous: !!anonymous, ts: Date.now(), status: "pending",
   };
-  db.posts.push(post);
-  await saveDB(db);
+  await mutateDB(async (db) => { db.posts.push(post); });
   broadcast("moderation", { pending: post.id });
   res.status(201).json({ id: post.id, status: "pending" });
 }));
@@ -680,49 +715,49 @@ app.get("/api/admin/posts/pending", requireAdmin, h(async (req, res) => {
 }));
 
 app.post("/api/admin/posts/:postId/approve", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
-  const post = db.posts.find((p) => p.id === req.params.postId);
-  if (!post) return res.status(404).json({ error: "Post not found." });
-  post.status = "approved";
-  post.ts = Date.now();
-  await saveDB(db);
-  broadcast("posts", { approved: post.id });
-  broadcast("moderation", { approved: post.id });
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    const post = db.posts.find((p) => p.id === req.params.postId);
+    if (!post) return res.status(404).json({ error: "Post not found." });
+    post.status = "approved";
+    post.ts = Date.now();
+    broadcast("posts", { approved: post.id });
+    broadcast("moderation", { approved: post.id });
+    res.json({ ok: true });
+  });
 }));
 
 app.post("/api/admin/posts/:postId/reject", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
-  const before = db.posts.length;
-  db.posts = db.posts.filter((p) => p.id !== req.params.postId);
-  if (db.posts.length === before) return res.status(404).json({ error: "Post not found." });
-  await saveDB(db);
-  broadcast("moderation", { rejected: req.params.postId });
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    const before = db.posts.length;
+    db.posts = db.posts.filter((p) => p.id !== req.params.postId);
+    if (db.posts.length === before) return res.status(404).json({ error: "Post not found." });
+    broadcast("moderation", { rejected: req.params.postId });
+    res.json({ ok: true });
+  });
 }));
 
 app.delete("/api/admin/posts/:postId", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
-  db.posts = db.posts.filter((p) => p.id !== req.params.postId);
-  await saveDB(db);
-  broadcast("posts", { deleted: req.params.postId });
-  broadcast("moderation", { deleted: req.params.postId });
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    db.posts = db.posts.filter((p) => p.id !== req.params.postId);
+    broadcast("posts", { deleted: req.params.postId });
+    broadcast("moderation", { deleted: req.params.postId });
+    res.json({ ok: true });
+  });
 }));
 
 app.delete("/api/posts/:postId", h(async (req, res) => {
-  const db = await loadDB();
-  const post = db.posts.find((p) => p.id === req.params.postId);
-  if (!post) return res.status(404).json({ error: "Post not found." });
   const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
   const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
-  const isOwner = requesterEmail && requesterEmail === post.email;
-  if (!isAdmin && !isOwner) return res.status(403).json({ error: "You can only delete your own posts." });
-  db.posts = db.posts.filter((p) => p.id !== req.params.postId);
-  await saveDB(db);
-  broadcast("posts", { deleted: req.params.postId });
-  broadcast("moderation", { deleted: req.params.postId });
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    const post = db.posts.find((p) => p.id === req.params.postId);
+    if (!post) return res.status(404).json({ error: "Post not found." });
+    const isOwner = requesterEmail && requesterEmail === post.email;
+    if (!isAdmin && !isOwner) return res.status(403).json({ error: "You can only delete your own posts." });
+    db.posts = db.posts.filter((p) => p.id !== req.params.postId);
+    broadcast("posts", { deleted: req.params.postId });
+    broadcast("moderation", { deleted: req.params.postId });
+    res.json({ ok: true });
+  });
 }));
 
 // ---------- Per-game chat ----------
@@ -743,19 +778,21 @@ app.post("/api/chat", h(async (req, res) => {
   const email = auth.verifySession(sessionToken);
   if (!email) return res.status(401).json({ error: "Please verify your email before chatting." });
   if (!gameId) return res.status(400).json({ error: "gameId is required." });
-  const db = await loadDB();
-  if (!db.games.find((g) => g.id === gameId)) return res.status(404).json({ error: "Game not found." });
   const body = String(text || "").trim();
   if (!body) return res.status(400).json({ error: "Message cannot be empty." });
   if (body.length > 500) return res.status(400).json({ error: "Message is too long (max 500 characters)." });
   const msg = { id: id(), gameId, text: body, email, author: nameFromEmail(email), ts: Date.now() };
-  db.chat.push(msg);
-  const gameMsgs = db.chat.filter((m) => m.gameId === gameId);
-  if (gameMsgs.length > CHAT_LIMIT * 3) {
-    const keepIds = new Set(gameMsgs.slice(-CHAT_LIMIT * 2).map((m) => m.id));
-    db.chat = db.chat.filter((m) => m.gameId !== gameId || keepIds.has(m.id));
-  }
-  await saveDB(db);
+  const sent = await mutateDB(async (db) => {
+    if (!db.games.find((g) => g.id === gameId)) { res.status(404).json({ error: "Game not found." }); return false; }
+    db.chat.push(msg);
+    const gameMsgs = db.chat.filter((m) => m.gameId === gameId);
+    if (gameMsgs.length > CHAT_LIMIT * 3) {
+      const keepIds = new Set(gameMsgs.slice(-CHAT_LIMIT * 2).map((m) => m.id));
+      db.chat = db.chat.filter((m) => m.gameId !== gameId || keepIds.has(m.id));
+    }
+    return true;
+  });
+  if (!sent) return;
   broadcast("chat", { id: msg.id, gameId });
   res.status(201).json(publicChatMsg(msg));
 }));
@@ -769,17 +806,17 @@ app.post("/api/chat/mine", h(async (req, res) => {
 }));
 
 app.delete("/api/chat/:msgId", h(async (req, res) => {
-  const db = await loadDB();
-  const msg = db.chat.find((m) => m.id === req.params.msgId);
-  if (!msg) return res.status(404).json({ error: "Message not found." });
   const isAdmin = req.header("x-admin-key") === ADMIN_KEY;
   const requesterEmail = auth.verifySession((req.body || {}).sessionToken);
-  const isOwner = requesterEmail && requesterEmail === msg.email;
-  if (!isAdmin && !isOwner) return res.status(403).json({ error: "You can only delete your own messages." });
-  db.chat = db.chat.filter((m) => m.id !== req.params.msgId);
-  await saveDB(db);
-  broadcast("chat", { deleted: req.params.msgId, gameId: msg.gameId });
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    const msg = db.chat.find((m) => m.id === req.params.msgId);
+    if (!msg) return res.status(404).json({ error: "Message not found." });
+    const isOwner = requesterEmail && requesterEmail === msg.email;
+    if (!isAdmin && !isOwner) return res.status(403).json({ error: "You can only delete your own messages." });
+    db.chat = db.chat.filter((m) => m.id !== req.params.msgId);
+    broadcast("chat", { deleted: req.params.msgId, gameId: msg.gameId });
+    res.json({ ok: true });
+  });
 }));
 
 // ---------- Admin API ----------
@@ -793,64 +830,60 @@ app.post("/api/admin/verify", (req, res) => {
 app.post("/api/admin/games", requireAdmin, h(async (req, res) => {
   const { name, emoji, description } = req.body || {};
   if (!name || !name.trim()) return res.status(400).json({ error: "Game name is required." });
-  const db = await loadDB();
   const game = { id: id(), name: name.trim(), emoji: (emoji || "\uD83C\uDFAE").trim(), description: (description || "").trim(), ts: Date.now() };
-  db.games.push(game);
-  await saveDB(db);
+  await mutateDB(async (db) => { db.games.push(game); });
   broadcast("games", { id: game.id });
   res.status(201).json(game);
 }));
 
 app.put("/api/admin/games/:gameId", requireAdmin, h(async (req, res) => {
   const { name, emoji, description } = req.body || {};
-  const db = await loadDB();
-  const game = db.games.find((g) => g.id === req.params.gameId);
-  if (!game) return res.status(404).json({ error: "Game not found." });
-  if (name !== undefined) {
-    if (!name.trim()) return res.status(400).json({ error: "Game name cannot be empty." });
-    game.name = name.trim();
-  }
-  if (emoji !== undefined) game.emoji = (emoji || "\uD83C\uDFAE").trim();
-  if (description !== undefined) game.description = description.trim();
-  await saveDB(db);
-  broadcast("games", { id: game.id });
-  res.json({ ok: true, game });
+  await mutateDB(async (db) => {
+    const game = db.games.find((g) => g.id === req.params.gameId);
+    if (!game) return res.status(404).json({ error: "Game not found." });
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ error: "Game name cannot be empty." });
+      game.name = name.trim();
+    }
+    if (emoji !== undefined) game.emoji = (emoji || "\uD83C\uDFAE").trim();
+    if (description !== undefined) game.description = description.trim();
+    broadcast("games", { id: game.id });
+    res.json({ ok: true, game });
+  });
 }));
 
 app.delete("/api/admin/games/:gameId", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
   const gid = req.params.gameId;
-  if (!db.games.find((g) => g.id === gid)) return res.status(404).json({ error: "Game not found." });
-  const matchIds = new Set(db.matches.filter((m) => m.gameId === gid).map((m) => m.id));
-  db.games = db.games.filter((g) => g.id !== gid);
-  db.matches = db.matches.filter((m) => m.gameId !== gid);
-  db.bids = db.bids.filter((b) => !matchIds.has(b.matchId));
-  db.chat = db.chat.filter((c) => c.gameId !== gid);
-  await saveDB(db);
-  broadcast("games", { deleted: gid });
-  broadcast("matches", {});
-  res.json({ ok: true });
+  await mutateDB(async (db) => {
+    if (!db.games.find((g) => g.id === gid)) return res.status(404).json({ error: "Game not found." });
+    const matchIds = new Set(db.matches.filter((m) => m.gameId === gid).map((m) => m.id));
+    db.games = db.games.filter((g) => g.id !== gid);
+    db.matches = db.matches.filter((m) => m.gameId !== gid);
+    db.bids = db.bids.filter((b) => !matchIds.has(b.matchId));
+    db.chat = db.chat.filter((c) => c.gameId !== gid);
+    broadcast("games", { deleted: gid });
+    broadcast("matches", {});
+    res.json({ ok: true });
+  });
 }));
 
 app.post("/api/admin/players", requireAdmin, h(async (req, res) => {
   const { name, org } = req.body || {};
   if (!name) return res.status(400).json({ error: "Player name is required." });
-  const db = await loadDB();
   const player = { id: id(), name: name.trim(), org: (org || "").trim() };
-  db.players.push(player);
-  await saveDB(db);
+  await mutateDB(async (db) => { db.players.push(player); });
   broadcast("matches", {});
   res.status(201).json(player);
 }));
 
 app.delete("/api/admin/players/:playerId", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
   const pid = req.params.playerId;
-  const matchIds = new Set(db.matches.filter((m) => m.playerAId === pid || m.playerBId === pid).map((m) => m.id));
-  db.players = db.players.filter((p) => p.id !== pid);
-  db.matches = db.matches.filter((m) => m.playerAId !== pid && m.playerBId !== pid);
-  db.bids = db.bids.filter((b) => !matchIds.has(b.matchId));
-  await saveDB(db);
+  await mutateDB(async (db) => {
+    const matchIds = new Set(db.matches.filter((m) => m.playerAId === pid || m.playerBId === pid).map((m) => m.id));
+    db.players = db.players.filter((p) => p.id !== pid);
+    db.matches = db.matches.filter((m) => m.playerAId !== pid && m.playerBId !== pid);
+    db.bids = db.bids.filter((b) => !matchIds.has(b.matchId));
+  });
   broadcast("matches", {});
   res.json({ ok: true });
 }));
@@ -860,18 +893,20 @@ app.post("/api/admin/matches", requireAdmin, h(async (req, res) => {
   if (!gameId) return res.status(400).json({ error: "A game is required." });
   if (!playerAId || !playerBId) return res.status(400).json({ error: "Both players are required." });
   if (playerAId === playerBId) return res.status(400).json({ error: "A match needs two different players." });
-  const db = await loadDB();
-  if (!db.games.find((g) => g.id === gameId)) return res.status(400).json({ error: "Unknown game." });
-  const ids = db.players.map((p) => p.id);
-  if (!ids.includes(playerAId) || !ids.includes(playerBId)) return res.status(400).json({ error: "Unknown player(s)." });
   const match = {
     id: id(), gameId, playerAId, playerBId,
     time: (time || "").trim(), day: (day || "Today").trim(), location: (location || "").trim(),
     status: "upcoming", result: null, winnerId: null,
     startAt: parseWhen(startAt), endAt: parseWhen(endAt),
   };
-  db.matches.push(match);
-  await saveDB(db);
+  const created = await mutateDB(async (db) => {
+    if (!db.games.find((g) => g.id === gameId)) { res.status(400).json({ error: "Unknown game." }); return false; }
+    const ids = db.players.map((p) => p.id);
+    if (!ids.includes(playerAId) || !ids.includes(playerBId)) { res.status(400).json({ error: "Unknown player(s)." }); return false; }
+    db.matches.push(match);
+    return true;
+  });
+  if (!created) return;
   broadcast("matches", { id: match.id, gameId });
   res.status(201).json(match);
 }));
@@ -911,7 +946,7 @@ app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async
   }
   if (!rows.length) return res.status(400).json({ error: "The sheet has no data rows." });
 
-  const db = await loadDB();
+  const result = await mutateDB(async (db) => {
 
   // Case-insensitive lookup maps for auto-create-by-name.
   const gameByName = {};
@@ -979,23 +1014,24 @@ app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async
   playersCreated = db.players.length - playersBefore;
 
   if (created > 0) {
-    await saveDB(db);
     broadcast("matches", {});
     broadcast("games", {});
   }
-  res.json({
+  return {
     ok: true,
     summary: { rows: rows.length, created, skipped: rows.length - created, gamesCreated, playersCreated },
     report,
+  };
   });
+  res.json(result);
 }));
 
 app.delete("/api/admin/matches/:matchId", requireAdmin, h(async (req, res) => {
-  const db = await loadDB();
   const mid = req.params.matchId;
-  db.matches = db.matches.filter((m) => m.id !== mid);
-  db.bids = db.bids.filter((b) => b.matchId !== mid);
-  await saveDB(db);
+  await mutateDB(async (db) => {
+    db.matches = db.matches.filter((m) => m.id !== mid);
+    db.bids = db.bids.filter((b) => b.matchId !== mid);
+  });
   broadcast("matches", { deleted: mid });
   res.json({ ok: true });
 }));
@@ -1004,25 +1040,25 @@ app.delete("/api/admin/matches/:matchId", requireAdmin, h(async (req, res) => {
 app.post("/api/admin/matches/:matchId/winner", requireAdmin, h(async (req, res) => {
   const body = req.body || {};
   const result = body.result !== undefined ? body.result : body.winnerId;
-  const db = await loadDB();
-  const match = db.matches.find((m) => m.id === req.params.matchId);
-  if (!match) return res.status(404).json({ error: "Match not found." });
-  const val = result || null;
-  if (val && val !== "draw" && val !== match.playerAId && val !== match.playerBId) {
-    return res.status(400).json({ error: "Result must be one of the two players or a draw." });
-  }
-  if (isDecided(match)) unsettleMatch(db, match); // reverse before re-applying
-  match.result = val;
-  match.winnerId = val && val !== "draw" ? val : null;
-  if (val) match.status = "finished";
-  else if (match.status === "finished") match.status = "upcoming";
-  let settlement = null;
-  if (val) settlement = settleMatch(db, match);
-  await saveDB(db);
-  broadcast("winner", { matchId: match.id, result: match.result });
-  broadcast("bids", { matchId: match.id, gameId: match.gameId });
-  broadcast("matches", { id: match.id });
-  res.json({ ok: true, match, settlement });
+  await mutateDB(async (db) => {
+    const match = db.matches.find((m) => m.id === req.params.matchId);
+    if (!match) return res.status(404).json({ error: "Match not found." });
+    const val = result || null;
+    if (val && val !== "draw" && val !== match.playerAId && val !== match.playerBId) {
+      return res.status(400).json({ error: "Result must be one of the two players or a draw." });
+    }
+    if (isDecided(match)) unsettleMatch(db, match); // reverse before re-applying
+    match.result = val;
+    match.winnerId = val && val !== "draw" ? val : null;
+    if (val) match.status = "finished";
+    else if (match.status === "finished") match.status = "upcoming";
+    let settlement = null;
+    if (val) settlement = settleMatch(db, match);
+    broadcast("winner", { matchId: match.id, result: match.result });
+    broadcast("bids", { matchId: match.id, gameId: match.gameId });
+    broadcast("matches", { id: match.id });
+    res.json({ ok: true, match, settlement });
+  });
 }));
 
 // Set live/upcoming/over status (does not affect result).
@@ -1031,23 +1067,23 @@ app.post("/api/admin/matches/:matchId/status", requireAdmin, h(async (req, res) 
   if (!["upcoming", "live", "over"].includes(status)) {
     return res.status(400).json({ error: "Status must be 'upcoming', 'live', or 'over'." });
   }
-  const db = await loadDB();
-  const match = db.matches.find((m) => m.id === req.params.matchId);
-  if (!match) return res.status(404).json({ error: "Match not found." });
-  if (isDecided(match)) {
-    return res.status(409).json({ error: "This match is finished (has a result). Clear the result first to change status." });
-  }
-  const wasLive = match.status === "live";
-  match.status = status;
-  await saveDB(db);
-  broadcast("matches", { id: match.id });
-  let notify = null;
-  if (status === "live" && !wasLive) {
-    const baseUrl = process.env.PUBLIC_URL || `${req.protocol}://${req.get("host")}`;
-    notifyMatchLive(db, match, baseUrl).catch((e) => console.error("[notify] error:", e.message));
-    notify = { queued: true, recipients: db.notifyOptIns.length };
-  }
-  res.json({ ok: true, match, notify });
+  await mutateDB(async (db) => {
+    const match = db.matches.find((m) => m.id === req.params.matchId);
+    if (!match) return res.status(404).json({ error: "Match not found." });
+    if (isDecided(match)) {
+      return res.status(409).json({ error: "This match is finished (has a result). Clear the result first to change status." });
+    }
+    const wasLive = match.status === "live";
+    match.status = status;
+    broadcast("matches", { id: match.id });
+    let notify = null;
+    if (status === "live" && !wasLive) {
+      const baseUrl = process.env.PUBLIC_URL || `${req.protocol}://${req.get("host")}`;
+      notifyMatchLive(db, match, baseUrl).catch((e) => console.error("[notify] error:", e.message));
+      notify = { queued: true, recipients: db.notifyOptIns.length };
+    }
+    res.json({ ok: true, match, notify });
+  });
 }));
 
 // ---------- Time-based auto-status scheduler ----------
@@ -1062,22 +1098,28 @@ async function runScheduler() {
   schedulerRunning = true;
   try {
     const now = Date.now();
-    const db = await loadDB();
-    let changed = false;
-    const wentLive = [];
-    for (const m of db.matches) {
-      if (isDecided(m)) continue;
-      if (m.status === "upcoming" && m.startAt && now >= m.startAt) {
-        m.status = "live";
-        changed = true;
-        wentLive.push(m);
-      } else if (m.status === "live" && m.endAt && now >= m.endAt) {
-        m.status = "over";
-        changed = true;
+    // Run the state flip under the same write lock as bids/settlement so the
+    // scheduler and a concurrent bid/admin action can't clobber each other.
+    // ponytail: mutateDB always re-saves the full dataset, so this rewrites the
+    // tables every 20s even with no changes — negligible at this scale (a few
+    // matches); revisit if the match count ever grows large.
+    const { db, changed, wentLive } = await mutateDB(async (db) => {
+      let changed = false;
+      const wentLive = [];
+      for (const m of db.matches) {
+        if (isDecided(m)) continue;
+        if (m.status === "upcoming" && m.startAt && now >= m.startAt) {
+          m.status = "live";
+          changed = true;
+          wentLive.push(m);
+        } else if (m.status === "live" && m.endAt && now >= m.endAt) {
+          m.status = "over";
+          changed = true;
+        }
       }
-    }
+      return { db, changed, wentLive };
+    });
     if (changed) {
-      await saveDB(db);
       broadcast("matches", {});
       broadcast("games", {});
       // Fire live notifications for matches that just auto-went-live.
@@ -1107,6 +1149,5 @@ async function runScheduler() {
   runScheduler(); // run once at boot
   app.listen(PORT, () => {
     console.log(`SnapGames server running at http://localhost:${PORT}`);
-    console.log(`Admin key: ${ADMIN_KEY}`);
   });
 })();
