@@ -24,6 +24,36 @@ if (document.readyState === "loading") {
   applyTheme(getTheme());
 }
 
+// ---------- Coin drop celebration ----------
+// Rains gold coins from the top of the viewport. Self-cleans and is a no-op
+// for users who prefer reduced motion (handled in CSS too, belt-and-suspenders).
+function dropCoins(count = 24) {
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  let layer = document.querySelector(".coin-layer");
+  if (!layer) {
+    layer = document.createElement("div");
+    layer.className = "coin-layer";
+    document.body.appendChild(layer);
+  }
+  for (let i = 0; i < count; i++) {
+    const c = document.createElement("div");
+    c.className = "coin";
+    c.style.left = (Math.random() * 100).toFixed(2) + "vw";
+    const size = 18 + Math.random() * 16; // 18–34px
+    c.style.width = c.style.height = size.toFixed(0) + "px";
+    c.style.animationDuration = (1.6 + Math.random() * 1.4).toFixed(2) + "s"; // 1.6–3.0s
+    c.style.animationDelay = (Math.random() * 0.5).toFixed(2) + "s";
+    c.addEventListener("animationend", () => c.remove());
+    layer.appendChild(c);
+  }
+  // Safety net: drop the layer once the last coin has certainly finished.
+  clearTimeout(dropCoins._t);
+  dropCoins._t = setTimeout(() => {
+    const l = document.querySelector(".coin-layer");
+    if (l && !l.children.length) l.remove();
+  }, 4000);
+}
+
 // ---------- Shared helpers ----------
 var CURRENT_GAME_ID = null; // set on the per-game page
 function api(path, opts = {}) {
@@ -413,6 +443,7 @@ async function placeBet(matchId, outcome, stake) {
       body: JSON.stringify({ outcome, stake, sessionToken: getSession().token }),
     });
     MY_BALANCE = r.balance;
+    dropCoins();
     toast(`Bid placed: ₹${stake}. Balance: ₹${r.balance}`, "ok");
     renderMatches(CURRENT_GAME_ID);
     renderNotifyBar();

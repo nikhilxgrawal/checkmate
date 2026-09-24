@@ -764,7 +764,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 .bid-chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
 .chip-btn {
   flex: 1; min-width: 60px;
-  background: var(--bg-2); border: 1px solid var(--line); color: #fff;
+  background: var(--bg-2); border: 1px solid var(--line); color: var(--white);
   border-radius: 8px; padding: 8px 6px; font-weight: 700; font-size: 13px; cursor: pointer;
 }
 .chip-btn:hover { border-color: var(--red); }
@@ -839,7 +839,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   border-radius: 10px;
   border: 1px solid var(--line);
   background: var(--bg-2);
-  color: #fff;
+  color: var(--white);
   font-family: inherit;
   font-size: 14px;
   margin-bottom: 10px;
@@ -882,7 +882,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #fff;
+  color: var(--white);
   cursor: pointer;
 }
 .identity-choice input[type="radio"] { width: auto; accent-color: var(--red); cursor: pointer; }
@@ -1022,3 +1022,40 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 [data-theme="light"] .theme-toggle { color: var(--white); }
 
 /* Chat "×" delete and muted crowns already use --muted which is dark in light mode. */
+
+/* ---------- Coin drop celebration (on a successful bid) ---------- */
+.coin-layer {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 9999;
+}
+.coin {
+  position: absolute;
+  top: -40px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #fff6bd, #f5c542 45%, #c9962a 100%);
+  border: 1px solid #b8841f;
+  box-shadow: 0 0 6px rgba(245, 197, 66, 0.7), inset 0 1px 3px rgba(255, 255, 255, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #7a5a10;
+  font-weight: 900;
+  font-size: 13px;
+  will-change: transform;
+  animation: coinFall linear forwards;
+}
+.coin::after { content: "\20B9"; } /* ₹ */
+@keyframes coinFall {
+  0%   { transform: translateY(-40px) rotate(0deg);      opacity: 0; }
+  8%   { opacity: 1; }
+  100% { transform: translateY(105vh) rotate(720deg);    opacity: 1; }
+}
+/* Respect users who prefer reduced motion — no falling coins for them. */
+@media (prefers-reduced-motion: reduce) {
+  .coin-layer { display: none; }
+}

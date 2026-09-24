@@ -4,7 +4,19 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=22" />
+  <script>
+    // Set the theme BEFORE first paint to prevent a flash of the wrong theme.
+    (function () {
+      try {
+        var t = localStorage.getItem("cm_theme");
+        if (t !== "light" && t !== "dark") {
+          t = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {}
+    })();
+  </script>
+  <link rel="stylesheet" href="/style.css?v=23" />
 </head>
 <body>
   <header class="topbar">
@@ -120,7 +132,7 @@
   <div class="footer">SnapGames · Acevector</div>
   <div id="toast" class="toast"></div>
 
-  <script src="/app.js?v=22"></script>
+  <script src="/app.js?v=23"></script>
   <script>initGame();</script>
 </body>
 </html>
