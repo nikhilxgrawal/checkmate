@@ -142,6 +142,80 @@ input, select, textarea {
 
 .container { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
 
+/* ---------- Header account widget (login / name / wallet, top-right) ---------- */
+.topbar-inner { gap: 12px; }
+.account-widget {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;          /* push to the far right */
+  flex-shrink: 0;
+}
+.account-widget .acct-wallet {
+  background: rgba(245, 197, 66, 0.15);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-weight: 800;
+  font-size: 13px;
+  padding: 5px 10px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+.account-widget .acct-name {
+  font-weight: 700;
+  font-size: 13px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.account-widget .acct-btn {
+  background: var(--glass-bg);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border);
+  color: var(--white);
+  font-weight: 700;
+  font-size: 12px;
+  padding: 7px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.account-widget .acct-btn:hover { background: var(--glass-bg-strong); }
+.account-widget .acct-btn.primary { background: var(--red); border-color: var(--red); color: #fff; }
+.account-widget .acct-btn.primary:hover { background: var(--red-dark); }
+
+/* ---------- Admin match rows ---------- */
+.admin-match {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  background: var(--glass-bg);
+}
+.admin-match:last-child { margin-bottom: 0; }
+.admin-match-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.admin-match-info { display: flex; flex-direction: column; gap: 4px; }
+.admin-match-title { font-size: 15px; }
+.admin-match-meta { color: var(--muted); font-size: 12px; }
+.admin-match-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.admin-match-controls select { flex: 1; min-width: 180px; }
+.admin-match-controls .btn { margin: 0; }
+
 /* ---------- Theme toggle button ---------- */
 .theme-toggle {
   background: var(--glass-bg);
@@ -260,16 +334,18 @@ main.container { animation: fadeInUp 0.35s ease both; }
 /* ---------- Section titles ---------- */
 .section-title {
   display: inline-block;
-  background: var(--red);
-  color: #fff;
+  background: transparent;
+  color: var(--white);
   font-weight: 800;
-  letter-spacing: 2px;
+  letter-spacing: 1.5px;
   text-transform: uppercase;
   font-size: 15px;
-  padding: 8px 22px;
-  border-radius: 6px;
-  margin: 28px 0 20px;
-  box-shadow: 0 6px 18px rgba(228, 0, 43, 0.35);
+  padding: 6px 0 8px;
+  border: none;
+  border-bottom: 3px solid var(--red);
+  border-radius: 0;
+  margin: 30px 0 14px;
+  box-shadow: none;
 }
 
 /* ---------- Match cards ---------- */
@@ -480,6 +556,37 @@ input, select {
   font-size: 14px;
 }
 input:focus, select:focus { outline: none; border-color: var(--red); }
+
+/* Custom dropdown arrow so <select> matches the theme */
+select {
+  -webkit-appearance: none;
+  appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'><path d='M2 4l4 4 4-4' fill='none' stroke='%239aa3b2' stroke-width='1.6'/></svg>");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  padding-right: 34px;
+}
+
+/* Themed file input (replaces the plain gray browser default) */
+input[type="file"] {
+  padding: 8px 12px;
+  cursor: pointer;
+}
+input[type="file"]::-webkit-file-upload-button,
+input[type="file"]::file-selector-button {
+  background: var(--red);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  margin-right: 12px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+input[type="file"]::-webkit-file-upload-button:hover,
+input[type="file"]::file-selector-button:hover { background: var(--red-dark); }
 .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .btn {
   margin-top: 14px;
@@ -624,6 +731,13 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   /* Topbar: brand left, nav becomes a horizontally-scrollable row */
   .topbar-inner { height: auto; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 0; }
   .brand { font-size: 20px; text-align: center; }
+  .account-widget {
+    margin-left: 0;
+    justify-content: center;
+    flex-wrap: wrap;
+    order: 3;
+  }
+  .account-widget .acct-name { max-width: 120px; }
   .nav {
     justify-content: center;
     flex-wrap: nowrap;
@@ -1074,8 +1188,30 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 .confirm-card .modal-sub { margin: 0 0 4px; }
 .confirm-actions {
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
-  margin-top: 20px;
+  gap: 12px;
+  margin-top: 22px;
 }
-.confirm-actions .btn { flex: 0 0 auto; margin: 0; }
+/* Make both buttons equal-width, properly sized, and clearly readable —
+   overrides the tiny .small/.danger sizing used elsewhere. */
+.confirm-actions .btn {
+  flex: 1 1 0;
+  margin: 0;
+  padding: 12px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  border-radius: 10px;
+}
+/* Cancel = neutral glass */
+.confirm-actions .btn.ghost {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  color: var(--white);
+}
+.confirm-actions .btn.ghost:hover { background: var(--glass-bg-strong); }
+/* Confirm (danger) = solid red, not a thin outline */
+.confirm-actions .btn.danger {
+  background: var(--red);
+  border: 1px solid var(--red);
+  color: #fff;
+}
+.confirm-actions .btn.danger:hover { background: var(--red-dark); border-color: var(--red-dark); }

@@ -144,9 +144,28 @@ function connectRealtime(handlers) {
 
 // ---------- Email verification (OTP) ----------
 function renderVerifyBar() {
+  // Prefer the header account widget; fall back to the in-body bar if present.
+  const widget = document.getElementById("accountWidget");
   const bar = document.getElementById("verifyBar");
-  if (!bar) return;
   const s = getSession();
+
+  if (widget) {
+    if (s.token) {
+      const bal = MY_BALANCE == null ? "" : `<span class="acct-wallet">💰 ₹${MY_BALANCE}</span>`;
+      widget.innerHTML =
+        `${bal}` +
+        `<span class="acct-name" title="${esc(s.email)}">${esc(s.name || s.email)}</span>` +
+        `<button class="acct-btn" onclick="signOutVoter()">Sign out</button>`;
+    } else {
+      widget.innerHTML = `<button class="acct-btn primary" onclick="openVerify()">Log in</button>`;
+    }
+    // Hide the old in-body verify bar since the header now shows this.
+    if (bar) bar.style.display = "none";
+    return;
+  }
+
+  // Legacy fallback (pages without the header widget)
+  if (!bar) return;
   if (s.token) {
     bar.innerHTML = `<span class="verify-ok">✓ Verified as <strong>${esc(s.name || s.email)}</strong></span>
       <button class="btn small ghost" onclick="signOutVoter()">Sign out</button>`;
@@ -220,6 +239,59 @@ function showCodeStep(email) {
       if (code.value.length === 6) submitOtp();
     };
     setTimeout(() => code.focus(), 60);
+  }
+  // Ensure a "Resend code" control exists in the code step, then start cooldown.
+  ensureResendControl();
+  startResendCountdown(60);
+}
+
+// Inject a resend row into #stepCode if not already present.
+function ensureResendControl() {
+  const step = document.getElementById("stepCode");
+  if (!step || document.getElementById("resendRow")) return;
+  const row = document.createElement("div");
+  row.id = "resendRow";
+  row.style.cssText = "margin-top:10px;font-size:13px;color:var(--muted);text-align:center";
+  row.innerHTML = `Didn't get it? <button id="resendBtn" class="btn ghost small" style="margin:0" onclick="resendOtp()">Resend code</button>`;
+  step.appendChild(row);
+}
+
+let _resendTimer = null;
+function startResendCountdown(seconds) {
+  const btn = document.getElementById("resendBtn");
+  if (!btn) return;
+  clearInterval(_resendTimer);
+  let left = seconds;
+  btn.disabled = true;
+  const tick = () => {
+    if (left <= 0) {
+      clearInterval(_resendTimer);
+      btn.disabled = false;
+      btn.textContent = "Resend code";
+      return;
+    }
+    btn.textContent = `Resend in ${left}s`;
+    left -= 1;
+  };
+  tick();
+  _resendTimer = setInterval(tick, 1000);
+}
+
+// Resend the OTP to the pending email (same flow as request, keeps code step).
+async function resendOtp() {
+  const email = window._pendingEmail;
+  if (!email) return;
+  const btn = document.getElementById("resendBtn");
+  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
+  try {
+    await api("/api/auth/request-otp", { method: "POST", body: JSON.stringify({ email }) });
+    toast("New code sent", "ok");
+    startResendCountdown(60);
+  } catch (e) {
+    // If server says wait, respect its retryAfter; else show the error.
+    const m = /wait (\d+)s/i.exec(e.message);
+    startResendCountdown(m ? Number(m[1]) : 60);
+    toast(e.message, "err");
   }
 }
 
@@ -329,6 +401,13 @@ async function renderMatches(gameId) {
 }
 
 function renderWalletBar() {
+  // Balance now lives in the header account widget — refresh it there.
+  if (document.getElementById("accountWidget")) {
+    renderVerifyBar();
+    const legacy = document.getElementById("walletBar");
+    if (legacy) legacy.style.display = "none";
+    return;
+  }
   const el = document.getElementById("walletBar");
   if (!el) return;
   if (!isVerified()) { el.style.display = "none"; return; }
@@ -1110,8 +1189,9 @@ async function loadAdminData() {
       : '<div class="empty">No games yet. Add one above.</div>';
   }
 
-  // Game selectors (add-match + filter)
-  const gameOpts = games.map((g) => `<option value="${g.id}">${esc(g.emoji || "🎮")} ${esc(g.name)}</option>`).join("");
+  // Game selectors (add-match + filter). No emoji in <option> — some browsers
+  // render the variation-selector emoji as a garbled glyph inside <select>.
+  const gameOpts = games.map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join("");
   const mGame = document.getElementById("mGame");
   if (mGame) mGame.innerHTML = games.length ? gameOpts : '<option value="">— add a game first —</option>';
   if (filterSel) {
@@ -1130,13 +1210,17 @@ async function loadAdminData() {
     : '<div class="empty">No players yet.</div>';
 
   const opts = players.map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.org || "")})</option>`).join("");
-  document.getElementById("mA").innerHTML = opts;
-  document.getElementById("mB").innerHTML = opts;
+  const mA = document.getElementById("mA");
+  const mB = document.getElementById("mB");
+  mA.innerHTML = opts;
+  mB.innerHTML = opts;
+  // Default Player B to a different player than A so they don't collide.
+  if (players.length > 1) { mA.selectedIndex = 0; mB.selectedIndex = 1; }
 
   document.getElementById("adminMatches").innerHTML = matches.length
     ? matches.map((m) => {
         const resultText = m.isDraw ? " · 🤝 Draw (½–½)" : m.winner ? " · 🏆 " + esc(m.winner.name) : "";
-        const gameTag = gameNameById[m.gameId] ? `<span class="chip ghost" style="margin:0 0 4px">${esc(gameNameById[m.gameId])}</span>` : "";
+        const gameTag = gameNameById[m.gameId] ? `<span class="chip ghost" style="margin:0">${esc(gameNameById[m.gameId])}</span>` : "";
         const finished = m.status === "finished";
         const statusControl = finished
           ? `<span class="chip win" style="margin:0">✅ Result set</span>`
@@ -1146,15 +1230,16 @@ async function loadAdminData() {
                <button class="seg ${m.status === "over" ? "on over" : ""}" onclick="setStatus('${m.id}','over')">🏁 Game Over</button>
              </div>`;
         return `
-        <div class="list-item" style="flex-wrap:wrap;gap:10px">
-          <div style="flex:1;min-width:200px">
-            ${gameTag}
-            <div><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs
-            <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
-            <div style="color:var(--muted);font-size:12px">${esc(m.time || "")} · ${esc(m.day || "")}${resultText}</div>
-          </div>
-          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:flex-end">
+        <div class="admin-match">
+          <div class="admin-match-head">
+            <div class="admin-match-info">
+              ${gameTag}
+              <div class="admin-match-title"><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
+              <div class="admin-match-meta">${esc(m.time || "")}${m.day ? " · " + esc(m.day) : ""}${resultText}</div>
+            </div>
             ${statusControl}
+          </div>
+          <div class="admin-match-controls">
             <select id="win_${m.id}">
               <option value="">— set result —</option>
               ${m.playerA ? `<option value="${m.playerA.id}" ${m.result === m.playerA.id ? "selected" : ""}>${esc(m.playerA.name)} wins</option>` : ""}
@@ -1162,7 +1247,7 @@ async function loadAdminData() {
               <option value="draw" ${m.result === "draw" ? "selected" : ""}>Draw (½–½)</option>
             </select>
             <button class="btn small" onclick="setWinner('${m.id}')">Save</button>
-            <button class="btn danger" onclick="delMatch('${m.id}')">Delete</button>
+            <button class="btn small danger" onclick="delMatch('${m.id}')">Delete</button>
           </div>
         </div>`;
       }).join("")

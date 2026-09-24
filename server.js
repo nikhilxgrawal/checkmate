@@ -5,10 +5,18 @@ const crypto = require("crypto");
 const mysql = require("mysql2/promise");
 const XLSX = require("xlsx");
 const multer = require("multer");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const auth = require("./auth");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Behind Render/Nginx/ALB the real client IP is in X-Forwarded-For. Trust the
+// proxy so rate limiting keys on the actual client, not the proxy IP.
+// TRUST_PROXY defaults to 1 (one proxy hop, correct for Render).
+app.set("trust proxy", Number(process.env.TRUST_PROXY || 1));
+
 const ADMIN_KEY = process.env.ADMIN_KEY;
 if (!ADMIN_KEY) {
   console.error("[fatal] ADMIN_KEY is not set. Refusing to start without an admin key.");
@@ -18,6 +26,60 @@ if (!ADMIN_KEY) {
 const STARTING_BALANCE = Number(process.env.STARTING_BALANCE || 10000);
 // MAX_BID = 0 (or unset) means no cap — a user may bid up to their balance.
 const MAX_BID = Number(process.env.MAX_BID || 0);
+
+// ---------- Security headers (helmet) ----------
+// The frontend uses inline <script>, inline onclick handlers, inline styles,
+// and a data: URI (select arrow). CSP therefore allows 'unsafe-inline' for
+// script/style and data: images. No external origins are used.
+app.use(helmet({
+  contentSecurityPolicy: {
+    useDefaults: false, // set directives explicitly so helmet doesn't add
+                        // script-src-attr 'none' (which blocks inline onclick)
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrcAttr: ["'unsafe-inline'"], // the app uses inline onclick handlers
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:"],
+      connectSrc: ["'self'"],     // SSE (/api/events) is same-origin
+      fontSrc: ["'self'", "data:"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"], // clickjacking protection
+      baseUri: ["'self'"],
+      formAction: ["'self'"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // avoid breaking SSE/simple embeds
+}));
+
+// ---------- Rate limiting ----------
+const rlOpts = { standardHeaders: true, legacyHeaders: false };
+// Global: generous cap to stop floods without hurting normal use.
+const globalLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 300,
+  message: { error: "Too many requests — please slow down." },
+  ...rlOpts,
+});
+// OTP send: expensive (sends email) — strict.
+const otpLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 5,
+  message: { error: "Too many code requests. Wait a minute and try again." },
+  ...rlOpts,
+});
+// Writes (bid / post / chat): moderate per-IP cap against spam.
+const writeLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 40,
+  message: { error: "You're doing that too fast — slow down." },
+  ...rlOpts,
+});
+// SSE connection opens: cap new stream connections per IP.
+const sseLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 30,
+  message: "rate limited",
+  ...rlOpts,
+});
+
+app.use(globalLimiter);
 
 // Parse JSON for everything EXCEPT multipart/form-data (file uploads), which
 // multer handles per-route. type:() => true otherwise parses even when the
@@ -143,11 +205,12 @@ async function saveDB(db) {
     }
     for (const m of db.matches) {
       await conn.query(
-        `INSERT INTO matches (id, gameId, playerAId, playerBId, time, day, location, status, result, winnerId, startAt, endAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO matches (id, gameId, playerAId, playerBId, time, day, location, status, result, winnerId, startAt, endAt, resultEmailedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [m.id, m.gameId, m.playerAId, m.playerBId, m.time || "", m.day || "Today",
          m.location || "", m.status || "upcoming", m.result || null, m.winnerId || null,
-         m.startAt != null ? m.startAt : null, m.endAt != null ? m.endAt : null]
+         m.startAt != null ? m.startAt : null, m.endAt != null ? m.endAt : null,
+         m.resultEmailedAt != null ? m.resultEmailedAt : null]
       );
     }
     for (const b of db.bids) {
@@ -247,8 +310,18 @@ async function seedIfEmpty() {
 
 // ---------- Realtime (Server-Sent Events) ----------
 const sseClients = new Set();
+// Cap concurrent SSE streams per IP to prevent connection/memory exhaustion.
+const sseByIp = new Map(); // ip -> count
+const MAX_SSE_PER_IP = Number(process.env.MAX_SSE_PER_IP || 5);
 
-app.get("/api/events", (req, res) => {
+app.get("/api/events", sseLimiter, (req, res) => {
+  const ip = req.ip;
+  const cur = sseByIp.get(ip) || 0;
+  if (cur >= MAX_SSE_PER_IP) {
+    return res.status(429).end("Too many live connections from your network.");
+  }
+  sseByIp.set(ip, cur + 1);
+
   res.set({
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
@@ -264,6 +337,8 @@ app.get("/api/events", (req, res) => {
   req.on("close", () => {
     clearInterval(ping);
     sseClients.delete(res);
+    const n = (sseByIp.get(ip) || 1) - 1;
+    if (n <= 0) sseByIp.delete(ip); else sseByIp.set(ip, n);
   });
 });
 
@@ -334,6 +409,24 @@ async function notifyMatchLive(db, match, baseUrl) {
   await Promise.all(Array.from({ length: CONCURRENCY }, worker));
   console.log(`[notify] match ${match.id} live: emailed ${sent}/${recipients.length} (failed ${failed})`);
   return { sent, failed, total: recipients.length };
+}
+
+// Email each bidder their win/loss result. Throttled (concurrency 3),
+// fire-and-forget. `results` = [{ to, won, stake, payout, balance, matchLine, outcomeLabel }]
+async function sendBetResultEmails(results) {
+  const url = (process.env.PUBLIC_URL || "").replace(/\/$/, "") || undefined;
+  const CONCURRENCY = 3;
+  let i = 0, sent = 0, failed = 0;
+  async function worker() {
+    while (i < results.length) {
+      const r = results[i++];
+      const out = await auth.sendBetResultEmail(r.to, { ...r, url });
+      if (out.ok) sent++; else failed++;
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  console.log(`[bet-result] emailed ${sent}/${results.length} bidders (failed ${failed})`);
+  return { sent, failed, total: results.length };
 }
 
 function nameFromEmail(email) {
@@ -518,7 +611,7 @@ app.get("/api/matches", h(async (req, res) => {
 }));
 
 // ---- Email OTP auth ----
-app.post("/api/auth/request-otp", h(async (req, res) => {
+app.post("/api/auth/request-otp", otpLimiter, h(async (req, res) => {
   const result = await auth.sendOtp((req.body || {}).email);
   if (!result.ok) return res.status(result.status).json({ error: result.error });
   res.json({ ok: true, email: result.email });
@@ -557,15 +650,17 @@ app.post("/api/wallet", h(async (req, res) => {
 
 // Place a bid on a match. Body: { outcome: "A"|"B"|"draw", stake: 1..MAX_BID, sessionToken }
 // One bid per user per match, only while Upcoming. Deducts stake from wallet.
-app.post("/api/matches/:matchId/bid", h(async (req, res) => {
+app.post("/api/matches/:matchId/bid", writeLimiter, h(async (req, res) => {
   const { outcome, stake, sessionToken } = req.body || {};
   const email = auth.verifySession(sessionToken);
   if (!email) return res.status(401).json({ error: "Please verify your email before bidding." });
   if (!["A", "B", "draw"].includes(outcome)) {
     return res.status(400).json({ error: "Choose Player A, Player B, or Draw." });
   }
-  const amt = Math.floor(Number(stake));
-  if (!Number.isFinite(amt) || amt < 1) {
+  // Stake must be a positive whole number. Reject floats, NaN, Infinity, and
+  // unsafe/huge integers outright (don't silently floor a bad value).
+  const amt = Number(stake);
+  if (!Number.isInteger(amt) || !Number.isSafeInteger(amt) || amt < 1) {
     return res.status(400).json({ error: "Bid must be a whole number of at least ₹1." });
   }
   if (MAX_BID > 0 && amt > MAX_BID) {
@@ -739,7 +834,7 @@ app.post("/api/posts/mine", h(async (req, res) => {
   res.json({ ids });
 }));
 
-app.post("/api/posts", h(async (req, res) => {
+app.post("/api/posts", writeLimiter, h(async (req, res) => {
   const { text, sessionToken, anonymous } = req.body || {};
   const email = auth.verifySession(sessionToken);
   if (!email) return res.status(401).json({ error: "Please verify your email before posting." });
@@ -825,7 +920,7 @@ app.get("/api/chat", h(async (req, res) => {
   res.json(msgs);
 }));
 
-app.post("/api/chat", h(async (req, res) => {
+app.post("/api/chat", writeLimiter, h(async (req, res) => {
   const { text, sessionToken, gameId } = req.body || {};
   const email = auth.verifySession(sessionToken);
   if (!email) return res.status(401).json({ error: "Please verify your email before chatting." });
@@ -1100,10 +1195,37 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, h(async (req, res) 
     if (val) match.status = "finished";
     else if (match.status === "finished") match.status = "upcoming";
     let settlement = null;
-    if (val) settlement = settleMatch(db, match);
+    let resultEmails = null;
+    if (val) {
+      settlement = settleMatch(db, match);
+      // Email each bidder their result — but only ONCE (first settle), so
+      // changing/correcting the result later doesn't re-spam everyone.
+      if (!match.resultEmailedAt) {
+        match.resultEmailedAt = Date.now();
+        const pm = playerMap(db);
+        const a = pm[match.playerAId] ? pm[match.playerAId].name : "Player A";
+        const b = pm[match.playerBId] ? pm[match.playerBId].name : "Player B";
+        const matchLine = `${a} vs ${b}`;
+        const winOutcome = winningOutcome(match);
+        const outLabel = winOutcome === "draw" ? "Draw"
+          : winOutcome === "A" ? a : b;
+        resultEmails = db.bids
+          .filter((bd) => bd.matchId === match.id)
+          .map((bd) => ({
+            to: bd.email,
+            won: (bd.payout || 0) > 0,
+            stake: bd.stake,
+            payout: bd.payout || 0,
+            balance: db.wallets[bd.email],
+            matchLine,
+            outcomeLabel: bd.outcome === "draw" ? "Draw" : (bd.outcome === "A" ? a : b),
+          }));
+      }
+    }
     return {
       status: 200,
       body: { ok: true, match, settlement },
+      resultEmails,
       broadcasts: [
         { event: "winner", data: { matchId: match.id, result: match.result } },
         { event: "bids", data: { matchId: match.id, gameId: match.gameId } },
@@ -1112,6 +1234,12 @@ app.post("/api/admin/matches/:matchId/winner", requireAdmin, h(async (req, res) 
     };
   });
   if (out.broadcasts) out.broadcasts.forEach((b) => broadcast(b.event, b.data));
+  // Fire-and-forget the result emails AFTER the DB write is committed.
+  if (out.resultEmails && out.resultEmails.length) {
+    sendBetResultEmails(out.resultEmails).catch((e) =>
+      console.error("[bet-result email] error:", e.message)
+    );
+  }
   res.status(out.status).json(out.body);
 }));
 

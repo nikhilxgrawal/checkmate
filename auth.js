@@ -5,6 +5,7 @@ const SESSION_SECRET =
   process.env.SESSION_SECRET || crypto.randomBytes(32).toString("hex");
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const OTP_MAX_ATTEMPTS = 5;
+const RESEND_COOLDOWN_MS = 60 * 1000; // 60s between OTP sends per email
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 // In-memory OTP store: email -> { hash, expires, attempts, lastSentAt }
@@ -73,13 +74,15 @@ async function sendOtp(rawEmail) {
     };
   }
 
-  // Rate limit: one OTP per 30s per email
+  // Rate limit: one OTP per 60s per email
   const existing = otpStore.get(email);
-  if (existing && Date.now() - existing.lastSentAt < 30 * 1000) {
+  if (existing && Date.now() - existing.lastSentAt < RESEND_COOLDOWN_MS) {
+    const retryAfter = Math.ceil((RESEND_COOLDOWN_MS - (Date.now() - existing.lastSentAt)) / 1000);
     return {
       ok: false,
       status: 429,
-      error: "Please wait a moment before requesting another code.",
+      retryAfter,
+      error: `Please wait ${retryAfter}s before requesting another code.`,
     };
   }
 
@@ -231,12 +234,48 @@ async function sendMatchLiveEmail(toEmail, { title, line, url } = {}) {
   }
 }
 
+// Email a bidder their result once a match is settled.
+// opts: { won:boolean, stake:number, payout:number, matchLine:string, outcomeLabel:string, balance:number, url }
+async function sendBetResultEmail(toEmail, opts = {}) {
+  const from = process.env.MAIL_FROM;
+  const { won, stake = 0, payout = 0, matchLine = "", outcomeLabel = "", balance, url } = opts;
+  const net = (payout || 0) - (stake || 0);
+  const headline = won ? "🎉 You won your bet!" : "😔 Better luck next time";
+  const accent = won ? "#3fbf6f" : "#e4002b";
+  const detailText = won
+    ? `Your ₹${stake} bid on ${outcomeLabel} won — you received ₹${payout} (net +₹${net}).`
+    : `Your ₹${stake} bid on ${outcomeLabel} didn't win. You lost ₹${stake}.`;
+  try {
+    await transporter().sendMail({
+      from: `SnapGames <${from}>`,
+      to: toEmail,
+      subject: won ? `🎉 You won ₹${payout} on SnapGames` : `Your SnapGames bet result`,
+      text: `${matchLine} — result is in. ${detailText}${balance != null ? ` Your balance: ₹${balance}.` : ""} ${url || ""}`,
+      html: `
+        <div style="font-family:Arial,sans-serif;background:#050608;color:#fff;padding:32px;border-radius:12px;max-width:460px;margin:auto">
+          <h1 style="letter-spacing:2px;margin:0 0 4px">SNAP<span style="color:#e4002b">GAMES</span></h1>
+          <p style="color:#9aa3b2;margin:0 0 20px;font-size:13px">The Acevector Gaming Arena</p>
+          <p style="font-size:20px;font-weight:900;color:${accent};margin:0 0 6px">${headline}</p>
+          <p style="font-size:15px;font-weight:700;margin:12px 0 4px">${matchLine}</p>
+          <p style="color:#cbd2dd;font-size:14px;margin:0 0 16px">${detailText}</p>
+          ${balance != null ? `<div style="display:inline-block;background:rgba(245,197,66,0.15);border:1px solid #f5c542;color:#f5c542;font-weight:800;padding:8px 14px;border-radius:20px">💰 Balance: ₹${balance}</div>` : ""}
+          ${url ? `<div style="margin-top:20px"><a href="${url}" style="display:inline-block;background:#e4002b;color:#fff;text-decoration:none;font-weight:700;padding:12px 22px;border-radius:8px">Open SnapGames</a></div>` : ""}
+          <p style="color:#6b7078;font-size:12px;margin-top:24px">You're receiving this because you placed a bid on this match.</p>
+        </div>`,
+    });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
 module.exports = {
   sendOtp,
   verifyOtp,
   verifySession,
   normalizeEmail,
   sendMatchLiveEmail,
+  sendBetResultEmail,
   verifySmtp,
 };
 
