@@ -1010,10 +1010,14 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 [data-theme="light"] .back-link:hover,
 [data-theme="light"] .modal-close:hover { color: var(--white); }
 
-/* Admin status toggle: "on" (non-live) segment sits on a light card in light mode */
-[data-theme="light"] .status-toggle .seg:hover,
-[data-theme="light"] .status-toggle .seg.on { color: var(--white); }
-[data-theme="light"] .status-toggle .seg.on { background: rgba(20,25,40,0.10); }
+/* Admin status toggle in light mode: guarantee every segment is readable
+   (inactive = dark text on white; active = dark text on tint; live/over keep
+   their colored fills). Higher specificity than the base .seg.on.live/.over. */
+[data-theme="light"] .status-toggle .seg { background: #fff; color: var(--muted); }
+[data-theme="light"] .status-toggle .seg:hover { color: var(--white); background: var(--card-2); }
+[data-theme="light"] .status-toggle .seg.on { background: rgba(20, 25, 40, 0.12); color: var(--white); }
+[data-theme="light"] .status-toggle .seg.on.live { background: var(--red); color: #fff; }
+[data-theme="light"] .status-toggle .seg.on.over { background: #6b7078; color: #fff; }
 
 /* Ghost buttons (e.g. Log Out): ensure readable dark text in light mode */
 [data-theme="light"] .btn.ghost { color: var(--white); }
@@ -1059,3 +1063,19 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 @media (prefers-reduced-motion: reduce) {
   .coin-layer { display: none; }
 }
+
+/* ---------- Confirmation dialog (styled replacement for window.confirm) ---------- */
+.confirm-card {
+  max-width: 380px;
+  text-align: left;
+  animation: fadeInUp 0.18s ease both;
+}
+.confirm-card h3 { margin: 0 0 6px; }
+.confirm-card .modal-sub { margin: 0 0 4px; }
+.confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+.confirm-actions .btn { flex: 0 0 auto; margin: 0; }

@@ -164,6 +164,45 @@ function closeVerify() {
   const m = document.getElementById("verifyModal");
   if (m) m.style.display = "none";
 }
+
+// Styled confirmation dialog — a themed replacement for window.confirm().
+// Returns a Promise<boolean>. `message`/`title` are trusted (developer) strings.
+function confirmDialog(message, opts = {}) {
+  const {
+    title = "Please confirm",
+    confirmText = "Confirm",
+    cancelText = "Cancel",
+    danger = true,
+  } = opts;
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "modal";
+    overlay.style.display = "flex";
+    overlay.innerHTML =
+      '<div class="modal-card confirm-card" role="alertdialog" aria-modal="true">' +
+      "<h3>" + title + "</h3>" +
+      '<p class="modal-sub">' + message + "</p>" +
+      '<div class="confirm-actions">' +
+      '<button class="btn ghost small" data-act="cancel">' + cancelText + "</button>" +
+      '<button class="btn ' + (danger ? "danger " : "") + 'small" data-act="ok">' + confirmText + "</button>" +
+      "</div></div>";
+    const done = (val) => {
+      overlay.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(val);
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") done(false);
+      else if (e.key === "Enter") done(true);
+    };
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) done(false); });
+    overlay.querySelector('[data-act="cancel"]').addEventListener("click", () => done(false));
+    overlay.querySelector('[data-act="ok"]').addEventListener("click", () => done(true));
+    document.addEventListener("keydown", onKey);
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-act="ok"]').focus();
+  });
+}
 function showEmailStep() {
   document.getElementById("stepEmail").style.display = "block";
   document.getElementById("stepCode").style.display = "none";
@@ -624,7 +663,9 @@ async function renderPosts() {
 }
 
 async function delPost(postId) {
-  if (!confirm("Delete this post?")) return;
+  if (!(await confirmDialog("This post will be permanently deleted.", {
+    title: "Delete post?", confirmText: "Delete",
+  }))) return;
   try {
     // Owner-or-admin endpoint: send admin key if present, and the session token.
     await api(`/api/posts/${postId}`, {
@@ -916,7 +957,9 @@ async function sendChat() {
 }
 
 async function deleteChat(msgId) {
-  if (!confirm("Delete this message?")) return;
+  if (!(await confirmDialog("This message will be permanently removed from the chat.", {
+    title: "Delete message?", confirmText: "Delete",
+  }))) return;
   try {
     // Send both credentials; server allows if owner (session) OR admin (key).
     await api(`/api/chat/${msgId}`, {

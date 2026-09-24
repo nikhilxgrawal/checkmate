@@ -968,12 +968,11 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 // Download a template .xlsx with the expected headers.
 app.get("/api/admin/matches/template", (req, res) => {
-  const headers = ["game", "playerA", "playerA_org", "playerB", "playerB_org", "time", "day", "location", "startAt"];
+  const headers = ["game", "playerA", "playerB", "time", "day", "location"];
   const sample = [{
-    game: "Chess", playerA: "Sandeep Singh Sachdeva", playerA_org: "Snapdeal",
-    playerB: "Rishi Sharma", playerB_org: "Unicommerce",
+    game: "Chess", playerA: "Sandeep Singh Sachdeva",
+    playerB: "Rishi Sharma",
     time: "1:30 PM - 2:00 PM", day: "Today", location: "Sky Deck - Tower A",
-    startAt: "2026-09-24 13:30",
   }];
   const ws = XLSX.utils.json_to_sheet(sample, { header: headers });
   const wb = XLSX.utils.book_new();
@@ -1014,13 +1013,10 @@ app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async
     gameByName[key] = g;
     return g;
   }
-  function ensurePlayer(name, org) {
+  function ensurePlayer(name) {
     const key = name.trim().toLowerCase();
-    if (playerByName[key]) {
-      if (org && !playerByName[key].org) playerByName[key].org = org.trim();
-      return playerByName[key];
-    }
-    const p = { id: id(), name: name.trim(), org: (org || "").trim() };
+    if (playerByName[key]) return playerByName[key];
+    const p = { id: id(), name: name.trim(), org: "" };
     db.players.push(p);
     playerByName[key] = p;
     return p;
@@ -1043,20 +1039,15 @@ app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async
       report.push({ row: rowNum, ok: false, error: "Player A and B must be different." });
       return;
     }
-    const startAt = parseWhen(row.startAt);
-    if (row.startAt && startAt == null) {
-      report.push({ row: rowNum, ok: false, error: `Unparseable startAt "${row.startAt}" (use YYYY-MM-DD HH:MM).` });
-      return;
-    }
     const g = ensureGame(game);
-    const pa = ensurePlayer(a, row.playerA_org);
-    const pb = ensurePlayer(b, row.playerB_org);
+    const pa = ensurePlayer(a);
+    const pb = ensurePlayer(b);
     db.matches.push({
       id: id(), gameId: g.id, playerAId: pa.id, playerBId: pb.id,
       time: String(row.time || "").trim(), day: String(row.day || "Today").trim(),
       location: String(row.location || "").trim(),
       status: "upcoming", result: null, winnerId: null,
-      startAt, endAt: null,
+      startAt: null, endAt: null,
     });
     created += 1;
     report.push({ row: rowNum, ok: true, match: `${g.name}: ${pa.name} vs ${pb.name}` });
