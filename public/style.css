@@ -625,18 +625,17 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 @media (max-width: 720px) {
   .container { padding: 0 14px; }
 
-  /* Topbar: brand left, nav becomes a horizontally-scrollable row */
-  .topbar-inner { height: auto; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 0; }
+  /* Topbar: brand on top, nav wraps below (everything stays visible/tappable) */
+  .topbar-inner { height: auto; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; }
   .brand { font-size: 20px; text-align: center; }
+  .brand .sub { font-size: 9px; letter-spacing: 1.5px; }
   .nav {
     justify-content: center;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    gap: 4px;
-    padding-bottom: 2px;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    gap: 4px 6px;
+    width: 100%;
   }
-  .nav::-webkit-scrollbar { display: none; }
   .nav a { padding: 8px 12px; font-size: 13px; white-space: nowrap; }
 
   /* Hero smaller on phones */
@@ -645,7 +644,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   .hero .subtitle { font-size: 12px; letter-spacing: 2px; }
 
   /* Grids collapse to one column */
-  .matches-grid, .games-grid { grid-template-columns: 1fr; gap: 14px; }
+  .matches-grid, .games-grid, .tournaments-grid, .profiles-grid { grid-template-columns: 1fr; gap: 14px; }
 
   /* Stats bar wraps tighter */
   .stats-bar { gap: 8px; }
@@ -1081,7 +1080,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 .ptourn-won { color: var(--muted); font-size: 13px; }
 
 /* Tournaments grid + cards */
-.tournaments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px; margin-top: 10px; }
+.tournaments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 16px; margin-top: 10px; }
 .tournament-card {
   background: var(--glass-bg); border: 1px solid var(--glass-border);
   border-radius: 16px; padding: 18px; box-shadow: var(--glass-shadow);
@@ -1150,7 +1149,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 }
 .profiles-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: 12px;
 }
 .profile-card {
@@ -1191,14 +1190,25 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 }
 
 /* Tournament + profile cards share the match-card interaction feel */
-.tournament-card, .profile-card { max-width: 100%; }
+.tournament-card, .profile-card { max-width: 100%; min-width: 0; }
 .tc-name, .pc-name { overflow-wrap: anywhere; }
+/* Let card internals shrink below their content's min width on tiny screens. */
+.tc-head, .tc-foot, .tc-meta, .tc-head > div, .tc-action { min-width: 0; }
+.tc-meta { overflow-wrap: anywhere; }
+.chip { max-width: 100%; }
 
-/* On phones the nav becomes a horizontal scroller; keep the user chip inline
-   with the links rather than stealing a second scroll row. */
+/* On phones the nav wraps to multiple centered rows so nothing (including the
+   user identity chip) is hidden off-screen. */
 @media (max-width: 720px) {
-  .nav { flex-wrap: nowrap; }
-  .nav-user { border-left: none; padding-left: 4px; margin-left: 2px; }
+  .nav { flex-wrap: wrap; justify-content: center; }
+  .nav-user {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+    width: 100%;
+    justify-content: center;
+    margin-top: 2px;
+  }
 }
 
 /* ---------- Org picker + org labels ---------- */
