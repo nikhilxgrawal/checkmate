@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Admin — SnapGames</title>
-  <link rel="stylesheet" href="/style.css?v=33" />
+  <link rel="stylesheet" href="/style.css?v=34" />
 </head>
 <body>
   <header class="topbar">
@@ -48,6 +48,20 @@
           <button class="btn" onclick="addAllowedOrg()">Add Org</button>
         </div>
         <div id="orgsAdminList" style="margin-top:16px"></div>
+      </div>
+
+      <!-- Add Cash -->
+      <div style="text-align:center"><span class="section-title">💰 Add Cash</span></div>
+      <div class="card">
+        <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+          Credit points to a user's wallet. Use a negative amount to deduct (balance can't go below 0).
+        </p>
+        <div class="row">
+          <div><label>User</label><select id="cashUser"></select></div>
+          <div><label>Amount (₹)</label><input id="cashAmount" type="number" step="1" placeholder="e.g. 5000" onkeydown="if(event.key==='Enter')addCash()" /></div>
+        </div>
+        <button class="btn" onclick="addCash()">Add Cash</button>
+        <div id="cashList" style="margin-top:16px"></div>
       </div>
 
       <!-- Manage Tournaments (games) -->
@@ -122,7 +136,7 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/app.js?v=33"></script>
+  <script src="/app.js?v=34"></script>
   <script>initAdmin();</script>
 </body>
 </html>

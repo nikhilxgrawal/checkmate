@@ -1413,6 +1413,40 @@ app.delete("/api/admin/orgs/:domain", requireAdmin, h(async (req, res) => {
   res.json({ ok: true, orgs: domains.map(domainToOrg) });
 }));
 
+// ---- Admin: wallets (add cash) ----
+// List all users with their name, org and current balance.
+app.get("/api/admin/wallets", requireAdmin, h(async (req, res) => {
+  const db = await loadDB();
+  const list = (db.users || [])
+    .map((u) => ({ email: u.email, name: u.name, org: orgName(u.email), balance: getBalance(db, u.email) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json(list);
+}));
+
+// Credit (or, with a negative amount, deduct) points to a user's wallet.
+app.post("/api/admin/wallet/credit", requireAdmin, h(async (req, res) => {
+  const { email, amount } = req.body || {};
+  const addr = auth.normalizeEmail(email);
+  const amt = Math.round(Number(amount));
+  if (!addr) return res.status(400).json({ error: "Select a user." });
+  if (!Number.isFinite(amt) || amt === 0) return res.status(400).json({ error: "Enter a non-zero whole amount." });
+  const out = await mutateDB(async (db) => {
+    const user = (db.users || []).find((u) => u.email === addr);
+    if (!user) { res.status(404).json({ error: "User not found." }); return null; }
+    const current = getBalance(db, addr);
+    const next = current + amt;
+    if (next < 0) {
+      res.status(400).json({ error: `That would make the balance negative (current ₹${current}).` });
+      return null;
+    }
+    db.wallets[addr] = next;
+    return { email: addr, name: user.name, added: amt, balance: next };
+  });
+  if (!out) return;
+  console.log(`[admin] wallet ${out.email} ${amt >= 0 ? "+" : ""}${amt} -> ₹${out.balance}`);
+  res.json({ ok: true, ...out });
+}));
+
 // ---- Admin: games CRUD ----
 app.post("/api/admin/games", requireAdmin, h(async (req, res) => {
   const { name, emoji, description } = req.body || {};
@@ -1641,7 +1675,8 @@ app.get("/api/admin/matches/template", (req, res) => {
   const sample = [{
     tournament: "Spring Chess Cup", gameType: "Chess",
     playerA_email: "g.siva@unicommerce.com", playerB_email: "a.roy@snapdeal.com",
-    location: "Sky Deck - Tower A", startAt: "2026-09-25 13:30", endAt: "2026-09-25 14:00",
+    location: "Sky Deck - Tower A", startAt: "2026-09-25 13:30",
+    endAt: "", // optional — leave blank if the match has no fixed end time
   }];
   const ws = XLSX.utils.json_to_sheet(sample, { header: headers });
   const wb = XLSX.utils.book_new();

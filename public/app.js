@@ -1026,6 +1026,7 @@ function showPanel() {
   loadModQueue();
   loadTournamentsAdmin();
   loadAllowedOrgsAdmin();
+  loadCashUsers();
   connectRealtime({
     moderation: () => loadModQueue(),
     matches: () => loadAdminData(),
@@ -1693,6 +1694,52 @@ async function addTournament() {
     renderOrgPicker("tOrgs", []);
     toast("Tournament created", "ok");
     loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---- Admin: add cash to a user's wallet ----
+async function loadCashUsers() {
+  const sel = document.getElementById("cashUser");
+  const listEl = document.getElementById("cashList");
+  if (!sel) return;
+  try {
+    const users = await api("/api/admin/wallets", { headers: adminHeaders() });
+    sel.innerHTML = users.length
+      ? users.map((u) => `<option value="${esc(u.email)}">${esc(u.name)} (${esc(u.email)}) — ₹${u.balance}</option>`).join("")
+      : '<option value="">— no users yet —</option>';
+    if (listEl) {
+      listEl.innerHTML = users.length
+        ? users.map((u) => `
+            <div class="admin-tournament">
+              <div class="admin-t-head">
+                <div class="admin-t-title">
+                  <strong>${esc(u.name)}</strong>
+                  ${u.org ? `<span class="chip ghost">🏢 ${esc(u.org)}</span>` : ""}
+                  <span style="color:var(--muted);font-size:12px">${esc(u.email)}</span>
+                </div>
+                <div class="admin-t-actions"><span class="chip win">₹${u.balance}</span></div>
+              </div>
+            </div>`).join("")
+        : '<div class="empty">No users yet.</div>';
+    }
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function addCash() {
+  const email = document.getElementById("cashUser").value;
+  const amount = parseInt(document.getElementById("cashAmount").value, 10);
+  if (!email) return toast("Select a user", "err");
+  if (!Number.isFinite(amount) || amount === 0) return toast("Enter a non-zero whole amount", "err");
+  try {
+    const r = await api("/api/admin/wallet/credit", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ email, amount }),
+    });
+    toast(`${amount > 0 ? "Added" : "Deducted"} ₹${Math.abs(amount)} ${amount > 0 ? "to" : "from"} ${r.name}. New balance ₹${r.balance}`, "ok");
+    document.getElementById("cashAmount").value = "";
+    loadCashUsers();
   } catch (e) { toast(e.message, "err"); }
 }
 
