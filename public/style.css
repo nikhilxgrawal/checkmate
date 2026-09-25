@@ -168,7 +168,9 @@ input, select, textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
 }
+.account-widget .acct-name:hover { text-decoration: underline; color: var(--red); }
 .account-widget .acct-btn {
   background: var(--glass-bg);
   -webkit-backdrop-filter: blur(8px);

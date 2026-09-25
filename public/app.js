@@ -185,7 +185,7 @@ function renderVerifyBar() {
       const bal = MY_BALANCE == null ? "" : `<span class="acct-wallet">💰 ₹${MY_BALANCE}</span>`;
       widget.innerHTML =
         `${bal}` +
-        `<span class="acct-name" title="${esc(s.email)}">${esc(s.name || s.email)}</span>` +
+        `<span class="acct-name" title="View your profile" onclick="openProfile('${esc(s.email)}')">${esc(s.name || s.email)}</span>` +
         `<button class="acct-btn" onclick="signOutVoter()">Sign out</button>`;
     } else {
       widget.innerHTML = `<button class="acct-btn primary" onclick="openVerify()">Log in</button>`;
