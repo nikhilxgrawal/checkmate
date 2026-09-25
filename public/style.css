@@ -276,10 +276,8 @@ main.container { animation: fadeInUp 0.35s ease both; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px 16px;
   min-height: 64px;
-  padding: 8px 0;
+  gap: 12px;
 }
 .brand {
   font-weight: 800;
@@ -1550,3 +1548,34 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   border-radius: 10px;
 }
 .t-edit .btn { align-self: flex-start; }
+
+/* ---------- Header: stack on tablet & phone (<=900px) ----------
+   Above 900px the header is a clean single 64px row. At/below it the brand,
+   nav and account widget stack in centered rows so the nav never wraps
+   awkwardly beside them in a squeezed line. */
+@media (max-width: 900px) {
+  .topbar-inner {
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: auto;
+    min-height: 0;
+    gap: 8px;
+    padding: 10px 0;
+  }
+  .brand { text-align: center; }
+  .brand .sub { font-size: 9px; letter-spacing: 1.5px; }
+  .nav {
+    justify-content: center;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    gap: 6px;
+    width: 100%;
+  }
+  .account-widget {
+    margin-left: 0;
+    justify-content: center;
+    flex-wrap: wrap;
+    order: 3;
+  }
+}
