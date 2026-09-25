@@ -276,7 +276,10 @@ main.container { animation: fadeInUp 0.35s ease both; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: 64px;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  min-height: 64px;
+  padding: 8px 0;
 }
 .brand {
   font-weight: 800;
@@ -292,13 +295,14 @@ main.container { animation: fadeInUp 0.35s ease both; }
   font-weight: 600;
   margin-top: -2px;
 }
-.nav { display: flex; gap: 8px; }
+.nav { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; row-gap: 6px; min-width: 0; }
 .nav a {
-  padding: 8px 14px;
+  padding: 8px 12px;
   border-radius: 8px;
   font-weight: 600;
   font-size: 14px;
   color: var(--muted);
+  white-space: nowrap;
   transition: all 0.15s;
 }
 .nav a:hover { color: var(--white); background: var(--card); }
@@ -728,8 +732,8 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
 @media (max-width: 720px) {
   .container { padding: 0 14px; }
 
-  /* Topbar: brand left, nav becomes a horizontally-scrollable row */
-  .topbar-inner { height: auto; flex-direction: column; align-items: stretch; gap: 6px; padding: 10px 0; }
+  /* Topbar: brand on top, nav wraps below (everything stays visible/tappable) */
+  .topbar-inner { height: auto; flex-direction: column; align-items: center; gap: 8px; padding: 10px 0; }
   .brand { font-size: 20px; text-align: center; }
   .account-widget {
     margin-left: 0;
@@ -738,15 +742,14 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
     order: 3;
   }
   .account-widget .acct-name { max-width: 120px; }
+  .brand .sub { font-size: 9px; letter-spacing: 1.5px; }
   .nav {
     justify-content: center;
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    gap: 4px;
-    padding-bottom: 2px;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    gap: 4px 6px;
+    width: 100%;
   }
-  .nav::-webkit-scrollbar { display: none; }
   .nav a { padding: 8px 12px; font-size: 13px; white-space: nowrap; }
 
   /* Hero smaller on phones */
@@ -755,7 +758,7 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   .hero .subtitle { font-size: 12px; letter-spacing: 2px; }
 
   /* Grids collapse to one column */
-  .matches-grid, .games-grid { grid-template-columns: 1fr; gap: 14px; }
+  .matches-grid, .games-grid, .tournaments-grid, .profiles-grid { grid-template-columns: 1fr; gap: 14px; }
 
   /* Stats bar wraps tighter */
   .stats-bar { gap: 8px; }
@@ -846,6 +849,8 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   position: relative;
   width: 100%;
   max-width: 400px;
+  max-height: 88vh;
+  overflow-y: auto;
   background: linear-gradient(180deg, var(--card-2), var(--card));
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -1242,3 +1247,306 @@ img, .board, .card, .match-card, .game-card { max-width: 100%; }
   color: #fff;
 }
 .confirm-actions .btn.danger:hover { background: var(--red-dark); border-color: var(--red-dark); }
+
+/* ---------- Profiles & Tournaments ---------- */
+
+/* Clickable name links (profiles) */
+.profile-link {
+  color: var(--red);
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 700;
+}
+.profile-link:hover { text-decoration: underline; }
+
+/* Reusable overlay card (profile + tournament detail modals) */
+.overlay-card { max-width: 520px; width: 100%; text-align: left; }
+
+.profile-head { display: flex; align-items: center; gap: 14px; margin-bottom: 16px; }
+.profile-avatar {
+  width: 56px; height: 56px; border-radius: 50%;
+  background: linear-gradient(135deg, var(--red), var(--red-dark));
+  color: #fff; font-weight: 900; font-size: 24px;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.profile-name { margin: 0; font-size: 20px; }
+.profile-email { color: var(--muted); font-size: 13px; word-break: break-all; }
+
+.profile-stats {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(84px, 1fr)); gap: 10px; margin-bottom: 18px;
+}
+.pstat {
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  border-radius: 12px; padding: 14px 8px; text-align: center;
+}
+.pstat-n { font-size: 24px; font-weight: 900; color: var(--red); }
+.pstat-l { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin-top: 2px; }
+
+.section-subtitle {
+  font-size: 12px; text-transform: uppercase; letter-spacing: 1px;
+  color: var(--muted); font-weight: 700; margin: 6px 0 8px;
+}
+
+.ptourn-list { display: flex; flex-direction: column; gap: 8px; max-height: 320px; overflow-y: auto; }
+.ptourn-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  border-radius: 10px; padding: 10px 12px;
+}
+.ptourn-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.ptourn-name { font-weight: 700; }
+.ptourn-stats { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.ptourn-pos { font-weight: 700; }
+.ptourn-won { color: var(--muted); font-size: 13px; }
+
+/* Tournaments grid + cards */
+.tournaments-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 16px; margin-top: 10px; }
+.tournament-card {
+  background: var(--glass-bg); border: 1px solid var(--glass-border);
+  border-radius: 16px; padding: 18px; box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(var(--glass-blur)); -webkit-backdrop-filter: blur(var(--glass-blur));
+  display: flex; flex-direction: column; gap: 12px;
+}
+.tournament-card.is-open { border-color: rgba(63, 191, 111, 0.5); }
+.tc-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.tc-name { font-size: 18px; font-weight: 800; margin-bottom: 6px; }
+.tc-meta { color: var(--muted); font-size: 13px; }
+.tc-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-top: 2px; }
+.tc-action { display: flex; align-items: center; gap: 8px; }
+
+/* Admin results editor */
+.results-panel {
+  border-top: 1px solid var(--line); margin-top: 4px; padding-top: 12px;
+}
+.results-head { color: var(--muted); font-size: 13px; margin-bottom: 10px; }
+.result-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-bottom: 1px dashed var(--line); flex-wrap: wrap;
+}
+.result-name { font-weight: 700; }
+.result-email { color: var(--muted); font-size: 12px; font-weight: 400; }
+.result-fields { display: flex; gap: 12px; flex-wrap: wrap; }
+.result-fields label { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.result-fields input { width: 90px; }
+
+/* ---------- Top-nav user area ---------- */
+.nav-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 6px;
+  padding-left: 10px;
+  border-left: 1px solid var(--line);
+}
+.nav-user:empty { border-left: none; padding-left: 0; margin-left: 0; }
+.nav-name {
+  font-weight: 800;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nav-balance {
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--gold);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .nav-user { border-left: none; padding-left: 0; margin-left: 0; }
+  .nav-name { max-width: 110px; }
+}
+
+/* ---------- Profiles directory page ---------- */
+.profile-search {
+  width: 100%;
+  margin: 0 0 16px;
+}
+.profiles-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
+  gap: 12px;
+}
+.profile-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 14px;
+  cursor: pointer;
+  transition: transform 0.12s, border-color 0.12s;
+}
+.profile-card:hover { transform: translateY(-2px); border-color: var(--red); }
+.profile-avatar.sm { width: 42px; height: 42px; font-size: 18px; }
+.pc-info { min-width: 0; flex: 1; }
+.pc-name { font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc-sub { color: var(--muted); font-size: 12px; }
+.pc-arrow { color: var(--muted); font-size: 22px; font-weight: 700; }
+
+/* ---------- Overflow hardening + cross-page consistency ---------- */
+/* Profile modal: let the TEXT block shrink/wrap, but keep the avatar a fixed
+   circle (it must never flex-grow, or border-radius:50% turns it into an oval). */
+.profile-head { min-width: 0; }
+.profile-head > div:not(.profile-avatar) { min-width: 0; flex: 1; }
+.profile-avatar { flex: 0 0 auto; }
+.profile-name { overflow-wrap: anywhere; }
+.profile-email { overflow-wrap: anywhere; word-break: break-word; }
+.ptourn-name { overflow-wrap: anywhere; }
+.ptourn-row { flex-wrap: wrap; }
+.overlay-card { max-width: 520px; }
+
+/* Top-nav: keep the signed-in identity from pushing the bar off-screen */
+.nav-user { flex-wrap: wrap; row-gap: 6px; }
+.nav-name { max-width: 140px; }
+@media (max-width: 900px) {
+  .nav-name { max-width: 110px; }
+}
+
+/* Tournament + profile cards share the match-card interaction feel */
+.tournament-card, .profile-card { max-width: 100%; min-width: 0; }
+.tc-name, .pc-name { overflow-wrap: anywhere; }
+/* Let card internals shrink below their content's min width on tiny screens. */
+.tc-head, .tc-foot, .tc-meta, .tc-head > div, .tc-action { min-width: 0; }
+.tc-meta { overflow-wrap: anywhere; }
+.chip { max-width: 100%; }
+
+/* On phones the nav wraps to multiple centered rows so nothing (including the
+   user identity chip) is hidden off-screen. */
+@media (max-width: 720px) {
+  .nav { flex-wrap: wrap; justify-content: center; }
+  .nav-user {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+    width: 100%;
+    justify-content: center;
+    margin-top: 2px;
+  }
+}
+
+/* ---------- Org picker + org labels ---------- */
+.org-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-top: 8px;
+}
+.org-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  color: var(--white);
+  cursor: pointer;
+}
+.org-opt input { width: auto; margin: 0; }
+.profile-org { color: var(--muted); font-size: 13px; margin-top: 2px; }
+.pc-org {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--gold);
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  margin-left: 4px;
+  white-space: nowrap;
+}
+
+/* ---------- Admin match rows (Manage Matches & Results) ---------- */
+.admin-match {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.admin-match:last-child { border-bottom: none; }
+.admin-match-head { display: flex; flex-direction: column; gap: 4px; }
+.admin-match-players { font-size: 15px; }
+.admin-match-players .vs-sm { color: var(--muted); margin: 0 4px; font-weight: 600; }
+.admin-match-sub { color: var(--muted); font-size: 12px; }
+.admin-match-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.admin-result-select { width: auto; min-width: 150px; margin: 0; flex: 0 1 auto; }
+.admin-match-controls .btn { margin: 0; }
+.admin-match-controls .btn.danger { margin-left: auto; }
+@media (max-width: 560px) {
+  .admin-match-controls .btn.danger { margin-left: 0; }
+  .admin-result-select { flex: 1 1 100%; }
+}
+
+/* Profile balance shown as its own chip line (not a stat box) to avoid the
+   wide ₹ value overflowing the stat grid on your own profile. */
+.profile-balance {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 14px;
+  color: var(--gold);
+  margin-bottom: 16px;
+}
+.profile-balance strong { color: var(--gold); }
+
+/* ---------- Admin: inline add row (Allowed Orgs) ---------- */
+.inline-add { display: flex; gap: 10px; align-items: center; }
+.inline-add input { flex: 1; min-width: 0; }
+.inline-add .btn { margin: 0; flex: 0 0 auto; white-space: nowrap; }
+
+/* ---------- Admin: org picker as a bordered group ---------- */
+.org-picker {
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--bg-2);
+  padding: 10px 12px;
+}
+.org-picker:empty { display: none; }
+
+/* ---------- Admin: Manage Tournaments list ---------- */
+.admin-tournament {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+.admin-tournament:last-child { border-bottom: none; }
+.admin-t-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.admin-t-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.admin-t-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.admin-t-actions .btn { margin: 0; }
+.t-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+  padding: 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.t-edit .btn { align-self: flex-start; }

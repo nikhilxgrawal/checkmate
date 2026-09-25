@@ -13,12 +13,14 @@ CREATE TABLE IF NOT EXISTS games (
 CREATE TABLE IF NOT EXISTS players (
   id VARCHAR(32) PRIMARY KEY,
   name VARCHAR(255) NOT NULL,
-  org VARCHAR(255) DEFAULT ''
+  org VARCHAR(255) DEFAULT '',
+  email VARCHAR(255) DEFAULT NULL   -- links this roster entry to a verified user (users.email)
 );
 
 CREATE TABLE IF NOT EXISTS matches (
   id VARCHAR(32) PRIMARY KEY,
   gameId VARCHAR(32) NOT NULL,
+  tournamentId VARCHAR(32) DEFAULT NULL,   -- the tournament this match belongs to
   playerAId VARCHAR(32) NOT NULL,
   playerBId VARCHAR(32) NOT NULL,
   time VARCHAR(255) DEFAULT '',
@@ -73,4 +75,50 @@ CREATE TABLE IF NOT EXISTS chat (
 
 CREATE TABLE IF NOT EXISTS notify_optins (
   email VARCHAR(255) PRIMARY KEY
+);
+
+-- Authenticated user profiles. One row per verified email. Created/updated on
+-- OTP verification. `name` defaults to a title-cased version of the email local
+-- part but is stored so it can be edited later.
+CREATE TABLE IF NOT EXISTS users (
+  email VARCHAR(255) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  createdAt BIGINT NOT NULL
+);
+
+-- Admin-created tournaments. Users may register/unregister only while
+-- now() is within [regStart, regEnd]. gameType is a free-text game name
+-- (typically chosen from the existing games list on the frontend).
+CREATE TABLE IF NOT EXISTS tournaments (
+  id VARCHAR(32) PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  gameType VARCHAR(255) NOT NULL DEFAULT '',
+  regStart BIGINT DEFAULT NULL,          -- epoch ms; registration opens
+  regEnd BIGINT DEFAULT NULL,            -- epoch ms; registration closes
+  status VARCHAR(16) NOT NULL DEFAULT 'active',  -- 'active' | 'archived'
+  orgs VARCHAR(500) NOT NULL DEFAULT '', -- comma-separated org ids allowed to register; empty = all orgs
+  createdAt BIGINT NOT NULL
+);
+
+-- One registration per (tournamentId, email). gamesWon and position are
+-- filled in by an admin recording results (position = final rank, NULL until set).
+CREATE TABLE IF NOT EXISTS tournament_registrations (
+  tournamentId VARCHAR(32) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  registeredAt BIGINT NOT NULL,
+  gamesWon INT NOT NULL DEFAULT 0,
+  position INT DEFAULT NULL,
+  PRIMARY KEY (tournamentId, email)
+);
+
+-- Allowed email domains (each domain's first label is an "org"). Managed from
+-- the admin panel. Seeded once from ALLOWED_EMAIL_DOMAINS on first boot.
+CREATE TABLE IF NOT EXISTS allowed_domains (
+  domain VARCHAR(255) PRIMARY KEY
+);
+
+-- Small key/value store for app bookkeeping (e.g. one-time seed markers).
+CREATE TABLE IF NOT EXISTS app_meta (
+  k VARCHAR(64) PRIMARY KEY,
+  v TEXT
 );

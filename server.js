@@ -10,6 +10,9 @@ const rateLimit = require("express-rate-limit");
 const auth = require("./auth");
 
 const app = express();
+// Disable ETag for API responses; combined with no-store below this guarantees
+// the client always gets fresh data (no stale-until-refresh on admin actions).
+app.set("etag", false);
 const PORT = process.env.PORT || 3000;
 
 // Behind Render/Nginx/ALB the real client IP is in X-Forwarded-For. Trust the
@@ -88,22 +91,34 @@ app.use(express.json({
   type: (req) => !String(req.headers["content-type"] || "").includes("multipart/form-data"),
   limit: "100kb",
 }));
-app.use(express.static(path.join(__dirname, "public")));
-
-// Lightweight request logger (no dependency). Placed after express.static, so
-// static assets are served above and don't spam the log — only dynamic routes
-// reach here. Logs method, path, final status and duration on response finish.
+// Request logger FIRST (before express.static) so it also times static assets
+// (HTML/JS/CSS) — previously those were served above the logger and invisible,
+// which is exactly where an intermittent stall could hide. To keep the log
+// readable we print every dynamic /api/ request, plus ANY request slower than
+// 500ms (including static), and flag >800ms as [SLOW] with a wall-clock time
+// so stalls can be correlated with when they're experienced.
 app.use((req, res, next) => {
   const start = Date.now();
   res.on("finish", () => {
-    console.log(
-      `[req] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${
-        Date.now() - start
-      }ms)`
-    );
+    const ms = Date.now() - start;
+    const isApi = req.path.startsWith("/api/");
+    if (isApi || ms > 500) {
+      const flag = ms > 800 ? " [SLOW]" : "";
+      console.log(
+        `[req ${new Date().toISOString()}] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)${flag}`
+      );
+    }
   });
   next();
 });
+
+// Dynamic API responses must never be cached by the browser.
+app.use("/api", (req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
+
+app.use(express.static(path.join(__dirname, "public")));
 
 // ---------- Data layer (MySQL) ----------
 const pool = mysql.createPool({
@@ -162,10 +177,17 @@ async function loadDB() {
   const [posts] = await pool.query("SELECT * FROM posts");
   const [chat] = await pool.query("SELECT * FROM chat");
   const [optins] = await pool.query("SELECT email FROM notify_optins");
+  const [users] = await pool.query("SELECT * FROM users");
+  const [tournaments] = await pool.query("SELECT * FROM tournaments");
+  const [registrations] = await pool.query("SELECT * FROM tournament_registrations");
 
   // Normalize MySQL tinyint(1) to boolean for posts / bids.
   posts.forEach((p) => (p.anonymous = !!p.anonymous));
   bids.forEach((b) => (b.settled = !!b.settled));
+  // orgs is stored as a comma-separated string; expose it as an array.
+  tournaments.forEach((t) => {
+    t.orgs = String(t.orgs || "").split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+  });
 
   const wallets = {};
   walletRows.forEach((w) => (wallets[w.email] = w.balance));
@@ -173,6 +195,7 @@ async function loadDB() {
   return {
     games, players, matches, bids, wallets, posts, chat,
     notifyOptIns: optins.map((o) => o.email),
+    users, tournaments, registrations,
   };
 }
 
@@ -191,6 +214,9 @@ async function saveDB(db) {
     await conn.query("DELETE FROM games");
     await conn.query("DELETE FROM wallets");
     await conn.query("DELETE FROM notify_optins");
+    await conn.query("DELETE FROM tournament_registrations");
+    await conn.query("DELETE FROM tournaments");
+    await conn.query("DELETE FROM users");
 
     for (const g of db.games) {
       await conn.query(
@@ -199,15 +225,15 @@ async function saveDB(db) {
       );
     }
     for (const p of db.players) {
-      await conn.query("INSERT INTO players (id, name, org) VALUES (?, ?, ?)", [
-        p.id, p.name, p.org || "",
+      await conn.query("INSERT INTO players (id, name, org, email) VALUES (?, ?, ?, ?)", [
+        p.id, p.name, p.org || "", p.email || null,
       ]);
     }
     for (const m of db.matches) {
       await conn.query(
-        `INSERT INTO matches (id, gameId, playerAId, playerBId, time, day, location, status, result, winnerId, startAt, endAt, resultEmailedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [m.id, m.gameId, m.playerAId, m.playerBId, m.time || "", m.day || "Today",
+        `INSERT INTO matches (id, gameId, tournamentId, playerAId, playerBId, time, day, location, status, result, winnerId, startAt, endAt, resultEmailedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [m.id, m.gameId, m.tournamentId || null, m.playerAId, m.playerBId, m.time || "", m.day || "Today",
          m.location || "", m.status || "upcoming", m.result || null, m.winnerId || null,
          m.startAt != null ? m.startAt : null, m.endAt != null ? m.endAt : null,
          m.resultEmailedAt != null ? m.resultEmailedAt : null]
@@ -240,6 +266,29 @@ async function saveDB(db) {
     }
     for (const email of db.notifyOptIns) {
       await conn.query("INSERT INTO notify_optins (email) VALUES (?)", [email]);
+    }
+    for (const u of db.users || []) {
+      await conn.query(
+        "INSERT INTO users (email, name, createdAt) VALUES (?, ?, ?)",
+        [u.email, u.name, u.createdAt || Date.now()]
+      );
+    }
+    for (const t of db.tournaments || []) {
+      const orgsStr = Array.isArray(t.orgs) ? t.orgs.join(",") : String(t.orgs || "");
+      await conn.query(
+        `INSERT INTO tournaments (id, name, gameType, regStart, regEnd, status, orgs, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [t.id, t.name, t.gameType || "", t.regStart != null ? t.regStart : null,
+         t.regEnd != null ? t.regEnd : null, t.status || "active", orgsStr, t.createdAt || Date.now()]
+      );
+    }
+    for (const r of db.registrations || []) {
+      await conn.query(
+        `INSERT INTO tournament_registrations (tournamentId, email, registeredAt, gamesWon, position)
+         VALUES (?, ?, ?, ?, ?)`,
+        [r.tournamentId, r.email, r.registeredAt || Date.now(),
+         r.gamesWon || 0, r.position != null ? r.position : null]
+      );
     }
 
     await conn.commit();
@@ -275,6 +324,147 @@ function mutateDB(fn) {
   // Keep the chain alive even if this mutation throws.
   writeChain = run.then(() => {}, () => {});
   return run;
+}
+
+// ---- Allowed orgs/domains config (DB-backed, admin-managed) ----
+// Create the config tables if they don't exist (so no manual migration is
+// needed on an existing DB).
+// Does a column exist on a table in the current database?
+async function columnExists(table, column) {
+  const [rows] = await pool.query(
+    `SELECT 1 FROM information_schema.columns
+     WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ? LIMIT 1`,
+    [table, column]
+  );
+  return rows.length > 0;
+}
+async function addColumnIfMissing(table, column, ddl) {
+  if (!(await columnExists(table, column))) {
+    await pool.query(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+    console.log(`[schema] added column ${table}.${column}`);
+  }
+}
+
+// Idempotent auto-migration run at every boot. Creates any missing tables and
+// adds any missing columns, so deploying the new code onto an existing database
+// upgrades it in place — no manual migration step needed. Requires the DB user
+// to have CREATE/ALTER privileges (managed MySQL app users normally do).
+async function ensureSchema() {
+  // Core tables (mirror schema.sql) — makes the app self-provisioning on a
+  // fresh or partial database, with no need to run schema.sql by hand.
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS games (
+       id VARCHAR(32) PRIMARY KEY, name VARCHAR(255) NOT NULL, emoji VARCHAR(16) DEFAULT '🎮',
+       description VARCHAR(500) DEFAULT '', ts BIGINT NOT NULL
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS players (
+       id VARCHAR(32) PRIMARY KEY, name VARCHAR(255) NOT NULL,
+       org VARCHAR(255) DEFAULT '', email VARCHAR(255) DEFAULT NULL
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS matches (
+       id VARCHAR(32) PRIMARY KEY, gameId VARCHAR(32) NOT NULL, tournamentId VARCHAR(32) DEFAULT NULL,
+       playerAId VARCHAR(32) NOT NULL, playerBId VARCHAR(32) NOT NULL, time VARCHAR(255) DEFAULT '',
+       day VARCHAR(64) DEFAULT 'Today', location VARCHAR(255) DEFAULT '', status VARCHAR(16) DEFAULT 'upcoming',
+       result VARCHAR(32) DEFAULT NULL, winnerId VARCHAR(32) DEFAULT NULL,
+       startAt BIGINT DEFAULT NULL, endAt BIGINT DEFAULT NULL
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS bids (
+       id VARCHAR(32) PRIMARY KEY, matchId VARCHAR(32) NOT NULL, gameId VARCHAR(32) NOT NULL,
+       email VARCHAR(255) NOT NULL, outcome VARCHAR(8) NOT NULL, stake INT NOT NULL, ts BIGINT NOT NULL,
+       settled TINYINT(1) NOT NULL DEFAULT 0, payout INT NOT NULL DEFAULT 0,
+       UNIQUE KEY uniq_match_email (matchId, email)
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS wallets (email VARCHAR(255) PRIMARY KEY, balance INT NOT NULL DEFAULT 1000)`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS posts (
+       id VARCHAR(32) PRIMARY KEY, text VARCHAR(500) NOT NULL, email VARCHAR(255) NOT NULL,
+       author VARCHAR(255) NOT NULL, anonymous TINYINT(1) DEFAULT 0, ts BIGINT NOT NULL,
+       status VARCHAR(16) DEFAULT 'pending'
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS chat (
+       id VARCHAR(32) PRIMARY KEY, gameId VARCHAR(32) NOT NULL, text VARCHAR(500) NOT NULL,
+       email VARCHAR(255) NOT NULL, author VARCHAR(255) NOT NULL, ts BIGINT NOT NULL
+     )`
+  );
+  await pool.query("CREATE TABLE IF NOT EXISTS notify_optins (email VARCHAR(255) PRIMARY KEY)");
+
+  // Feature tables (safe to run repeatedly).
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS users (
+       email VARCHAR(255) PRIMARY KEY, name VARCHAR(255) NOT NULL, createdAt BIGINT NOT NULL
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS tournaments (
+       id VARCHAR(32) PRIMARY KEY, name VARCHAR(255) NOT NULL,
+       gameType VARCHAR(255) NOT NULL DEFAULT '', regStart BIGINT DEFAULT NULL,
+       regEnd BIGINT DEFAULT NULL, status VARCHAR(16) NOT NULL DEFAULT 'active',
+       orgs VARCHAR(500) NOT NULL DEFAULT '', createdAt BIGINT NOT NULL
+     )`
+  );
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS tournament_registrations (
+       tournamentId VARCHAR(32) NOT NULL, email VARCHAR(255) NOT NULL,
+       registeredAt BIGINT NOT NULL, gamesWon INT NOT NULL DEFAULT 0,
+       position INT DEFAULT NULL, PRIMARY KEY (tournamentId, email)
+     )`
+  );
+  await pool.query("CREATE TABLE IF NOT EXISTS allowed_domains (domain VARCHAR(255) PRIMARY KEY)");
+  await pool.query("CREATE TABLE IF NOT EXISTS app_meta (k VARCHAR(64) PRIMARY KEY, v TEXT)");
+
+  // New columns on pre-existing tables (MySQL has no portable ADD COLUMN IF
+  // NOT EXISTS, so we check information_schema first).
+  await addColumnIfMissing("players", "email", "email VARCHAR(255) DEFAULT NULL");
+  await addColumnIfMissing("matches", "tournamentId", "tournamentId VARCHAR(32) DEFAULT NULL");
+  await addColumnIfMissing("tournaments", "orgs", "orgs VARCHAR(500) NOT NULL DEFAULT ''");
+}
+async function getMeta(k) {
+  const [rows] = await pool.query("SELECT v FROM app_meta WHERE k = ?", [k]);
+  return rows.length ? rows[0].v : null;
+}
+async function setMeta(k, v) {
+  await pool.query(
+    "INSERT INTO app_meta (k, v) VALUES (?, ?) ON DUPLICATE KEY UPDATE v = VALUES(v)",
+    [k, v]
+  );
+}
+async function loadAllowedDomains() {
+  const [rows] = await pool.query("SELECT domain FROM allowed_domains ORDER BY domain");
+  return rows.map((r) => r.domain);
+}
+// Push the DB list into the auth layer so registration checks use it live.
+async function refreshAllowedDomains() {
+  const domains = await loadAllowedDomains();
+  auth.setAllowedDomains(domains);
+  return domains;
+}
+// One-time seed from ALLOWED_EMAIL_DOMAINS so existing config carries over.
+// After this the admin fully owns the list (including clearing it = any domain).
+async function seedAllowedDomainsOnce() {
+  if (await getMeta("orgs_seeded")) return;
+  const envDomains = (process.env.ALLOWED_EMAIL_DOMAINS || "")
+    .split(",").map((d) => d.trim().toLowerCase()).filter(Boolean);
+  for (const d of envDomains) {
+    await pool.query("INSERT IGNORE INTO allowed_domains (domain) VALUES (?)", [d]);
+  }
+  await setMeta("orgs_seeded", "1");
+  console.log(`[config] seeded allowed domains from env: ${envDomains.join(", ") || "(none)"}`);
+}
+// Shape a domain into { domain, org, name } for the admin UI.
+function domainToOrg(d) {
+  const org = (String(d).split(".")[0] || "").toLowerCase();
+  return { domain: d, org, name: org ? org.charAt(0).toUpperCase() + org.slice(1) : d };
 }
 
 // Seed the tournament data if the DB is empty.
@@ -331,6 +521,7 @@ app.get("/api/events", sseLimiter, (req, res) => {
   res.flushHeaders();
   res.write("retry: 3000\n\n");
   sseClients.add(res);
+  console.log(`[sse] client connected (open=${sseClients.size}) from ${req.ip}`);
   const ping = setInterval(() => {
     try { res.write(": ping\n\n"); } catch { /* ignore */ }
   }, 25000);
@@ -436,6 +627,172 @@ function nameFromEmail(email) {
     .filter(Boolean)
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
     .join(" ") || email;
+}
+
+// Title-cased org label derived from the email domain (unicommerce -> Unicommerce).
+function orgName(email) {
+  const org = auth.orgFromEmail(email);
+  return org ? org.charAt(0).toUpperCase() + org.slice(1) : "";
+}
+
+// ---- User profile helpers ----
+// Ensure a users row exists for this email; returns the user object. Name
+// defaults to the title-cased email local part (same as nameFromEmail).
+function ensureUser(db, email) {
+  if (!db.users) db.users = [];
+  let u = db.users.find((x) => x.email === email);
+  if (!u) {
+    u = { email, name: nameFromEmail(email), createdAt: Date.now() };
+    db.users.push(u);
+  }
+  return u;
+}
+
+function displayName(db, email) {
+  const u = (db.users || []).find((x) => x.email === email);
+  return (u && u.name) || nameFromEmail(email);
+}
+
+// Ensure a roster entry (player) exists for a user email; returns it.
+function ensurePlayerForUser(db, email) {
+  if (!db.players) db.players = [];
+  let p = db.players.find((x) => x.email === email);
+  if (!p) {
+    const u = (db.users || []).find((x) => x.email === email);
+    p = { id: id(), name: (u && u.name) || nameFromEmail(email), org: "", email };
+    db.players.push(p);
+  }
+  return p;
+}
+
+// Ensure a backing "game" exists for a tournament (shared id) so matches,
+// betting, chat and leaderboards — all scoped by gameId — keep working while
+// matches are organised under a tournament.
+function ensureGameForTournament(db, t) {
+  if (!db.games) db.games = [];
+  let g = db.games.find((x) => x.id === t.id);
+  if (!g) {
+    g = {
+      id: t.id,
+      name: t.gameType ? `${t.gameType} — ${t.name}` : t.name,
+      emoji: "🏆",
+      description: t.name,
+      ts: t.createdAt || Date.now(),
+    };
+    db.games.push(g);
+  }
+  return g;
+}
+
+// ---- Tournament helpers ----
+// Registration window state for a tournament, given "now".
+function regState(t, now = Date.now()) {
+  const start = t.regStart != null ? t.regStart : null;
+  const end = t.regEnd != null ? t.regEnd : null;
+  if (start != null && now < start) return "upcoming"; // registration not open yet
+  if (end != null && now > end) return "closed";        // registration window passed
+  return "open";                                        // within window (or no bounds set)
+}
+function regOpen(t, now = Date.now()) { return regState(t, now) === "open"; }
+
+// Normalize a requested org list against the allowed orgs. Returns a clean
+// array (subset of allowed); empty array means "all orgs".
+function sanitizeOrgs(orgs) {
+  const allowed = new Set(auth.allowedOrgs());
+  if (!Array.isArray(orgs)) return [];
+  const clean = orgs
+    .map((o) => String(o || "").trim().toLowerCase())
+    .filter((o) => o && (allowed.size === 0 || allowed.has(o)));
+  return [...new Set(clean)];
+}
+
+// Is a user (by email) eligible to register for this tournament's org scope?
+function orgEligible(t, email) {
+  const orgs = Array.isArray(t.orgs) ? t.orgs : [];
+  if (orgs.length === 0) return true; // open to all orgs
+  return orgs.includes(auth.orgFromEmail(email));
+}
+
+// Build the public shape of a tournament, including participant count and,
+// optionally, whether a given email is registered.
+function tournamentSummary(db, t, forEmail) {
+  const regs = (db.registrations || []).filter((r) => r.tournamentId === t.id);
+  const orgs = Array.isArray(t.orgs) ? t.orgs : [];
+  const orgsLabel = orgs.length
+    ? orgs.map((o) => o.charAt(0).toUpperCase() + o.slice(1)).join(", ")
+    : "All orgs";
+  return {
+    id: t.id,
+    name: t.name,
+    gameType: t.gameType || "",
+    regStart: t.regStart != null ? t.regStart : null,
+    regEnd: t.regEnd != null ? t.regEnd : null,
+    status: t.status || "active",
+    orgs,
+    orgsLabel,
+    createdAt: t.createdAt || 0,
+    registrationState: regState(t),
+    registrationOpen: regOpen(t),
+    participantCount: regs.length,
+    registered: forEmail ? regs.some((r) => r.email === forEmail) : undefined,
+    eligible: forEmail ? orgEligible(t, forEmail) : undefined,
+  };
+}
+
+// Build a public profile for an email: name, tournaments participated (with
+// per-tournament position + games won) and aggregate stats.
+function buildProfile(db, email) {
+  const name = displayName(db, email);
+  const regs = (db.registrations || []).filter((r) => r.email === email);
+  const tById = {};
+  (db.tournaments || []).forEach((t) => (tById[t.id] = t));
+  const tournaments = regs
+    .map((r) => {
+      const t = tById[r.tournamentId];
+      if (!t) return null;
+      return {
+        id: t.id,
+        name: t.name,
+        gameType: t.gameType || "",
+        registeredAt: r.registeredAt || 0,
+        gamesWon: r.gamesWon || 0,
+        position: r.position != null ? r.position : null,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.registeredAt - a.registeredAt);
+  const totalGamesWon = tournaments.reduce((s, t) => s + (t.gamesWon || 0), 0);
+  const podiums = tournaments.filter((t) => t.position != null && t.position <= 3).length;
+
+  // Games played/won come from decided matches involving any roster entry
+  // (player) linked to this user's email.
+  const myPlayerIds = new Set(
+    (db.players || []).filter((p) => p.email === email).map((p) => p.id)
+  );
+  let gamesPlayed = 0, gamesWon = 0, gamesDrawn = 0;
+  (db.matches || []).forEach((m) => {
+    const inMatch = myPlayerIds.has(m.playerAId) || myPlayerIds.has(m.playerBId);
+    if (!inMatch) return;
+    const r = matchResult(m);
+    if (!r) return; // only count decided matches
+    gamesPlayed += 1;
+    if (r === "draw") gamesDrawn += 1;
+    else if (myPlayerIds.has(r)) gamesWon += 1;
+  });
+
+  return {
+    email,
+    name,
+    org: auth.orgFromEmail(email),
+    orgName: orgName(email),
+    tournamentsParticipated: tournaments.length,
+    totalGamesWon,
+    podiums,
+    tournaments,
+    gamesPlayed,
+    gamesWon,
+    gamesDrawn,
+  };
 }
 
 // Parse a start/end time into epoch ms. Accepts:
@@ -544,6 +901,16 @@ app.get("/api/players", h(async (req, res) => {
   res.json(db.players);
 }));
 
+// Central client config: the allowed orgs (derived from ALLOWED_EMAIL_DOMAINS).
+// Drives the registration hint and the admin's per-org tournament scoping.
+app.get("/api/config", h(async (req, res) => {
+  res.json({
+    allowedOrgs: auth.allowedOrgs().map((o) => ({
+      id: o, name: o.charAt(0).toUpperCase() + o.slice(1),
+    })),
+  });
+}));
+
 // ---- Games ----
 function gameSummary(db, g) {
   const gameMatches = db.matches.filter((m) => m.gameId === g.id);
@@ -627,6 +994,7 @@ app.post("/api/auth/verify-otp", h(async (req, res) => {
     optedIn = await mutateDB(async (db) => {
       addOptIn(db, result.email);
       getBalance(db, result.email); // ensure a wallet exists on first login
+      ensureUser(db, result.email); // ensure a profile exists on first login
       return isOptedIn(db, result.email);
     });
   } catch (e) {
@@ -644,7 +1012,12 @@ app.post("/api/auth/verify-otp", h(async (req, res) => {
 app.post("/api/wallet", h(async (req, res) => {
   const email = auth.verifySession((req.body || {}).sessionToken);
   if (!email) return res.json({ verified: false, balance: null });
-  const balance = await mutateDB(async (db) => getBalance(db, email));
+  // Read-only: this is polled on every page load (nav balance chip), so it must
+  // NOT go through mutateDB (a full DB rewrite under the global write lock).
+  // The wallet row is created at verify-otp time; if it's somehow missing we
+  // just report the starting balance without persisting.
+  const db = await loadDB();
+  const balance = db.wallets[email] !== undefined ? db.wallets[email] : STARTING_BALANCE;
   res.json({ verified: true, email, balance });
 }));
 
@@ -814,6 +1187,160 @@ app.get("/api/leaderboard/bettors", h(async (req, res) => {
   res.json(board);
 }));
 
+// ---- User profiles & directory ----
+
+// Public profile for any user by email. Anyone can view any profile.
+app.get("/api/users/:email/profile", h(async (req, res) => {
+  const email = auth.normalizeEmail(req.params.email);
+  const db = await loadDB();
+  // Only expose profiles for users who have actually logged in / registered.
+  const known = (db.users || []).some((u) => u.email === email) ||
+    (db.registrations || []).some((r) => r.email === email);
+  if (!known) return res.status(404).json({ error: "User not found." });
+  res.json(buildProfile(db, email));
+}));
+
+// The verified user's own profile.
+app.post("/api/profile", h(async (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.status(401).json({ error: "Please verify your email to view your profile." });
+  const db = await loadDB();
+  // Self profile also includes the private wallet balance.
+  res.json({ ...buildProfile(db, email), balance: getBalance(db, email) });
+}));
+
+// Directory of known users (for browsing profiles).
+app.get("/api/users", h(async (req, res) => {
+  const db = await loadDB();
+  const list = (db.users || [])
+    .map((u) => {
+      const p = buildProfile(db, u.email);
+      return {
+        email: u.email, name: u.name,
+        org: p.org, orgName: p.orgName,
+        tournamentsParticipated: p.tournamentsParticipated,
+        totalGamesWon: p.totalGamesWon,
+        gamesPlayed: p.gamesPlayed,
+        gamesWon: p.gamesWon,
+      };
+    })
+    .sort((a, b) => b.gamesWon - a.gamesWon || b.tournamentsParticipated - a.tournamentsParticipated || a.name.localeCompare(b.name));
+  res.json(list);
+}));
+
+// ---- Tournaments (public read + register/unregister) ----
+
+app.get("/api/tournaments", h(async (req, res) => {
+  const db = await loadDB();
+  const list = (db.tournaments || [])
+    .filter((t) => (t.status || "active") !== "archived")
+    .map((t) => tournamentSummary(db, t))
+    .sort((a, b) => {
+      // Open registrations first, then upcoming, then closed; newest within each.
+      const rank = { open: 0, upcoming: 1, closed: 2 };
+      return (rank[a.registrationState] - rank[b.registrationState]) ||
+        (b.createdAt - a.createdAt);
+    });
+  res.json(list);
+}));
+
+// Which tournaments the verified user is registered for: { ids: [...] }.
+app.post("/api/tournaments/mine", h(async (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.json({ ids: [] });
+  const db = await loadDB();
+  const ids = (db.registrations || []).filter((r) => r.email === email).map((r) => r.tournamentId);
+  res.json({ ids });
+}));
+
+app.get("/api/tournaments/:id", h(async (req, res) => {
+  const db = await loadDB();
+  const t = (db.tournaments || []).find((x) => x.id === req.params.id);
+  if (!t) return res.status(404).json({ error: "Tournament not found." });
+  const participants = (db.registrations || [])
+    .filter((r) => r.tournamentId === t.id)
+    .map((r) => ({
+      email: r.email,
+      name: displayName(db, r.email),
+      registeredAt: r.registeredAt || 0,
+      gamesWon: r.gamesWon || 0,
+      position: r.position != null ? r.position : null,
+    }))
+    .sort((a, b) => {
+      // Ranked participants first (by position), then the rest by name.
+      if (a.position != null && b.position != null) return a.position - b.position;
+      if (a.position != null) return -1;
+      if (b.position != null) return 1;
+      return a.name.localeCompare(b.name);
+    });
+  res.json({ ...tournamentSummary(db, t), participants });
+}));
+
+app.post("/api/tournaments/:id/register", h(async (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.status(401).json({ error: "Please verify your email before registering." });
+  const out = await mutateDB(async (db) => {
+    const t = (db.tournaments || []).find((x) => x.id === req.params.id);
+    if (!t) { res.status(404).json({ error: "Tournament not found." }); return null; }
+    if ((t.status || "active") === "archived") { res.status(409).json({ error: "This tournament is archived." }); return null; }
+    const state = regState(t);
+    if (state !== "open") {
+      res.status(409).json({
+        error: state === "upcoming"
+          ? "Registration hasn't opened for this tournament yet."
+          : "Registration for this tournament has closed.",
+      });
+      return null;
+    }
+    if (!orgEligible(t, email)) {
+      res.status(403).json({
+        error: `This tournament is only open to: ${tournamentSummary(db, t).orgsLabel}.`,
+      });
+      return null;
+    }
+    ensureUser(db, email);
+    if (!db.registrations) db.registrations = [];
+    if (db.registrations.some((r) => r.tournamentId === t.id && r.email === email)) {
+      res.status(409).json({ error: "You're already registered for this tournament." });
+      return null;
+    }
+    db.registrations.push({
+      tournamentId: t.id, email, registeredAt: Date.now(), gamesWon: 0, position: null,
+    });
+    return tournamentSummary(db, t, email);
+  });
+  if (!out) return;
+  broadcast("tournaments", { id: req.params.id });
+  res.status(201).json({ ok: true, tournament: out });
+}));
+
+app.post("/api/tournaments/:id/unregister", h(async (req, res) => {
+  const email = auth.verifySession((req.body || {}).sessionToken);
+  if (!email) return res.status(401).json({ error: "Please verify your email first." });
+  const out = await mutateDB(async (db) => {
+    const t = (db.tournaments || []).find((x) => x.id === req.params.id);
+    if (!t) { res.status(404).json({ error: "Tournament not found." }); return null; }
+    const state = regState(t);
+    if (state === "closed") {
+      res.status(409).json({ error: "Registration has closed — you can no longer unregister." });
+      return null;
+    }
+    if (!db.registrations) db.registrations = [];
+    const before = db.registrations.length;
+    db.registrations = db.registrations.filter(
+      (r) => !(r.tournamentId === t.id && r.email === email)
+    );
+    if (db.registrations.length === before) {
+      res.status(409).json({ error: "You're not registered for this tournament." });
+      return null;
+    }
+    return tournamentSummary(db, t, email);
+  });
+  if (!out) return;
+  broadcast("tournaments", { id: req.params.id });
+  res.json({ ok: true, tournament: out });
+}));
+
 // ---- Community posts (pre-moderated) ----
 function isApproved(p) { return p.status === "approved" || p.status === undefined; }
 function publicPost(p) {
@@ -973,6 +1500,66 @@ app.post("/api/admin/verify", (req, res) => {
   res.status(401).json({ error: "Invalid admin key." });
 });
 
+// ---- Admin: allowed orgs (email domains) ----
+app.get("/api/admin/orgs", requireAdmin, h(async (req, res) => {
+  const domains = await loadAllowedDomains();
+  res.json(domains.map(domainToOrg));
+}));
+
+app.post("/api/admin/orgs", requireAdmin, h(async (req, res) => {
+  const domain = String((req.body || {}).domain || "").trim().toLowerCase();
+  // Basic domain shape: something.tld, no spaces or @.
+  if (!/^[^\s@]+\.[^\s@]+$/.test(domain)) {
+    return res.status(400).json({ error: "Enter a valid email domain, e.g. acme.com" });
+  }
+  await pool.query("INSERT IGNORE INTO allowed_domains (domain) VALUES (?)", [domain]);
+  const domains = await refreshAllowedDomains();
+  console.log(`[config] allowed domain added: ${domain} (now: ${domains.join(", ") || "any"})`);
+  res.status(201).json({ ok: true, orgs: domains.map(domainToOrg) });
+}));
+
+app.delete("/api/admin/orgs/:domain", requireAdmin, h(async (req, res) => {
+  const domain = String(req.params.domain || "").trim().toLowerCase();
+  await pool.query("DELETE FROM allowed_domains WHERE domain = ?", [domain]);
+  const domains = await refreshAllowedDomains();
+  console.log(`[config] allowed domain removed: ${domain} (now: ${domains.join(", ") || "any"})`);
+  res.json({ ok: true, orgs: domains.map(domainToOrg) });
+}));
+
+// ---- Admin: wallets (add cash) ----
+// List all users with their name, org and current balance.
+app.get("/api/admin/wallets", requireAdmin, h(async (req, res) => {
+  const db = await loadDB();
+  const list = (db.users || [])
+    .map((u) => ({ email: u.email, name: u.name, org: orgName(u.email), balance: getBalance(db, u.email) }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  res.json(list);
+}));
+
+// Credit (or, with a negative amount, deduct) points to a user's wallet.
+app.post("/api/admin/wallet/credit", requireAdmin, h(async (req, res) => {
+  const { email, amount } = req.body || {};
+  const addr = auth.normalizeEmail(email);
+  const amt = Math.round(Number(amount));
+  if (!addr) return res.status(400).json({ error: "Select a user." });
+  if (!Number.isFinite(amt) || amt === 0) return res.status(400).json({ error: "Enter a non-zero whole amount." });
+  const out = await mutateDB(async (db) => {
+    const user = (db.users || []).find((u) => u.email === addr);
+    if (!user) { res.status(404).json({ error: "User not found." }); return null; }
+    const current = getBalance(db, addr);
+    const next = current + amt;
+    if (next < 0) {
+      res.status(400).json({ error: `That would make the balance negative (current ₹${current}).` });
+      return null;
+    }
+    db.wallets[addr] = next;
+    return { email: addr, name: user.name, added: amt, balance: next };
+  });
+  if (!out) return;
+  console.log(`[admin] wallet ${out.email} ${amt >= 0 ? "+" : ""}${amt} -> ₹${out.balance}`);
+  res.json({ ok: true, ...out });
+}));
+
 // ---- Admin: games CRUD ----
 app.post("/api/admin/games", requireAdmin, h(async (req, res) => {
   const { name, emoji, description } = req.body || {};
@@ -1014,13 +1601,133 @@ app.delete("/api/admin/games/:gameId", requireAdmin, h(async (req, res) => {
   });
 }));
 
+// ---- Admin: tournaments CRUD + results ----
+app.post("/api/admin/tournaments", requireAdmin, h(async (req, res) => {
+  const { name, gameType, regStart, regEnd, orgs } = req.body || {};
+  if (!name || !name.trim()) return res.status(400).json({ error: "Tournament name is required." });
+  const start = parseWhen(regStart);
+  const end = parseWhen(regEnd);
+  if (regStart && start == null) return res.status(400).json({ error: "Unparseable registration start time." });
+  if (regEnd && end == null) return res.status(400).json({ error: "Unparseable registration end time." });
+  if (start != null && end != null && end < start) {
+    return res.status(400).json({ error: "Registration end must be after the start." });
+  }
+  const tournament = {
+    id: id(), name: name.trim(), gameType: (gameType || "").trim(),
+    regStart: start, regEnd: end, status: "active",
+    orgs: sanitizeOrgs(orgs), createdAt: Date.now(),
+  };
+  await mutateDB(async (db) => {
+    if (!db.tournaments) db.tournaments = [];
+    db.tournaments.push(tournament);
+  });
+  broadcast("tournaments", { id: tournament.id });
+  res.status(201).json(tournament);
+}));
+
+app.put("/api/admin/tournaments/:id", requireAdmin, h(async (req, res) => {
+  const { name, gameType, regStart, regEnd, status, orgs } = req.body || {};
+  await mutateDB(async (db) => {
+    const t = (db.tournaments || []).find((x) => x.id === req.params.id);
+    if (!t) return res.status(404).json({ error: "Tournament not found." });
+    if (orgs !== undefined) t.orgs = sanitizeOrgs(orgs);
+    if (name !== undefined) {
+      if (!name.trim()) return res.status(400).json({ error: "Tournament name cannot be empty." });
+      t.name = name.trim();
+    }
+    if (gameType !== undefined) t.gameType = (gameType || "").trim();
+    if (regStart !== undefined) {
+      const s = parseWhen(regStart);
+      if (regStart && s == null) return res.status(400).json({ error: "Unparseable registration start time." });
+      t.regStart = s;
+    }
+    if (regEnd !== undefined) {
+      const e = parseWhen(regEnd);
+      if (regEnd && e == null) return res.status(400).json({ error: "Unparseable registration end time." });
+      t.regEnd = e;
+    }
+    if (t.regStart != null && t.regEnd != null && t.regEnd < t.regStart) {
+      return res.status(400).json({ error: "Registration end must be after the start." });
+    }
+    if (status !== undefined) {
+      if (!["active", "archived"].includes(status)) return res.status(400).json({ error: "Invalid status." });
+      t.status = status;
+    }
+    broadcast("tournaments", { id: t.id });
+    res.json({ ok: true, tournament: t });
+  });
+}));
+
+app.delete("/api/admin/tournaments/:id", requireAdmin, h(async (req, res) => {
+  const tid = req.params.id;
+  await mutateDB(async (db) => {
+    if (!(db.tournaments || []).some((t) => t.id === tid)) return res.status(404).json({ error: "Tournament not found." });
+    db.tournaments = (db.tournaments || []).filter((t) => t.id !== tid);
+    db.registrations = (db.registrations || []).filter((r) => r.tournamentId !== tid);
+    broadcast("tournaments", { deleted: tid });
+    res.json({ ok: true });
+  });
+}));
+
+// Record results: set gamesWon and/or final position per participant.
+// Body: { results: [{ email, gamesWon, position }] }. Only updates existing
+// registrations; unknown emails are reported as skipped.
+app.post("/api/admin/tournaments/:id/results", requireAdmin, h(async (req, res) => {
+  const results = ((req.body || {}).results) || [];
+  if (!Array.isArray(results)) return res.status(400).json({ error: "results must be an array." });
+  const out = await mutateDB(async (db) => {
+    const t = (db.tournaments || []).find((x) => x.id === req.params.id);
+    if (!t) { res.status(404).json({ error: "Tournament not found." }); return null; }
+    let updated = 0;
+    const skipped = [];
+    for (const row of results) {
+      const email = auth.normalizeEmail(row.email);
+      const reg = (db.registrations || []).find((r) => r.tournamentId === t.id && r.email === email);
+      if (!reg) { skipped.push(email); continue; }
+      if (row.gamesWon !== undefined && row.gamesWon !== null && row.gamesWon !== "") {
+        const gw = Math.floor(Number(row.gamesWon));
+        reg.gamesWon = Number.isFinite(gw) && gw >= 0 ? gw : 0;
+      }
+      if (row.position !== undefined) {
+        if (row.position === null || row.position === "") reg.position = null;
+        else {
+          const pos = Math.floor(Number(row.position));
+          reg.position = Number.isFinite(pos) && pos >= 1 ? pos : null;
+        }
+      }
+      updated += 1;
+    }
+    return { updated, skipped };
+  });
+  if (!out) return;
+  broadcast("tournaments", { id: req.params.id });
+  res.json({ ok: true, ...out });
+}));
+
+// Add a user to the match roster. The user MUST already exist (i.e. have
+// verified their email / created an account). The roster entry ("player") is
+// linked to that user by email so match results flow into their profile.
 app.post("/api/admin/players", requireAdmin, h(async (req, res) => {
-  const { name, org } = req.body || {};
-  if (!name) return res.status(400).json({ error: "Player name is required." });
-  const player = { id: id(), name: name.trim(), org: (org || "").trim() };
-  await mutateDB(async (db) => { db.players.push(player); });
+  const { email, org } = req.body || {};
+  const addr = auth.normalizeEmail(email);
+  if (!addr) return res.status(400).json({ error: "Select a user (email) to add." });
+  const out = await mutateDB(async (db) => {
+    const user = (db.users || []).find((u) => u.email === addr);
+    if (!user) {
+      res.status(400).json({ error: "That user doesn't exist yet. They must create an account (verify their email) first." });
+      return null;
+    }
+    if ((db.players || []).some((p) => p.email === addr)) {
+      res.status(409).json({ error: "That user is already on the roster." });
+      return null;
+    }
+    const player = { id: id(), name: user.name, org: (org || "").trim(), email: addr };
+    db.players.push(player);
+    return player;
+  });
+  if (!out) return;
   broadcast("matches", {});
-  res.status(201).json(player);
+  res.status(201).json(out);
 }));
 
 app.delete("/api/admin/players/:playerId", requireAdmin, h(async (req, res) => {
@@ -1035,27 +1742,41 @@ app.delete("/api/admin/players/:playerId", requireAdmin, h(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// Create a match UNDER a tournament, between two of its registered users.
+// Body: { tournamentId, playerAEmail, playerBEmail, location, startAt, endAt }.
 app.post("/api/admin/matches", requireAdmin, h(async (req, res) => {
-  const { gameId, playerAId, playerBId, time, day, location, startAt, endAt } = req.body || {};
-  if (!gameId) return res.status(400).json({ error: "A game is required." });
-  if (!playerAId || !playerBId) return res.status(400).json({ error: "Both players are required." });
-  if (playerAId === playerBId) return res.status(400).json({ error: "A match needs two different players." });
-  const match = {
-    id: id(), gameId, playerAId, playerBId,
-    time: (time || "").trim(), day: (day || "Today").trim(), location: (location || "").trim(),
-    status: "upcoming", result: null, winnerId: null,
-    startAt: parseWhen(startAt), endAt: parseWhen(endAt),
-  };
-  const created = await mutateDB(async (db) => {
-    if (!db.games.find((g) => g.id === gameId)) { res.status(400).json({ error: "Unknown game." }); return false; }
-    const ids = db.players.map((p) => p.id);
-    if (!ids.includes(playerAId) || !ids.includes(playerBId)) { res.status(400).json({ error: "Unknown player(s)." }); return false; }
+  const { tournamentId, playerAEmail, playerBEmail, location, startAt, endAt } = req.body || {};
+  const aEmail = auth.normalizeEmail(playerAEmail);
+  const bEmail = auth.normalizeEmail(playerBEmail);
+  if (!tournamentId) return res.status(400).json({ error: "Pick a tournament." });
+  if (!aEmail || !bEmail) return res.status(400).json({ error: "Pick both players." });
+  if (aEmail === bEmail) return res.status(400).json({ error: "A match needs two different players." });
+  const out = await mutateDB(async (db) => {
+    const t = (db.tournaments || []).find((x) => x.id === tournamentId);
+    if (!t) { res.status(404).json({ error: "Tournament not found." }); return null; }
+    const registered = (email) =>
+      (db.registrations || []).some((r) => r.tournamentId === t.id && r.email === email);
+    if (!registered(aEmail) || !registered(bEmail)) {
+      res.status(400).json({ error: "Both players must be registered to this tournament first." });
+      return null;
+    }
+    const game = ensureGameForTournament(db, t);
+    const pa = ensurePlayerForUser(db, aEmail);
+    const pb = ensurePlayerForUser(db, bEmail);
+    const match = {
+      id: id(), gameId: game.id, tournamentId: t.id,
+      playerAId: pa.id, playerBId: pb.id,
+      time: "", day: "Today", location: (location || "").trim(),
+      status: "upcoming", result: null, winnerId: null,
+      startAt: parseWhen(startAt), endAt: parseWhen(endAt),
+    };
     db.matches.push(match);
-    return true;
+    return match;
   });
-  if (!created) return;
-  broadcast("matches", { id: match.id, gameId });
-  res.status(201).json(match);
+  if (!out) return;
+  broadcast("matches", { id: out.id, gameId: out.gameId });
+  broadcast("games", {});
+  res.status(201).json(out);
 }));
 
 // ---- Admin: bulk match upload (XLSX) ----
@@ -1063,11 +1784,12 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 
 // Download a template .xlsx with the expected headers.
 app.get("/api/admin/matches/template", (req, res) => {
-  const headers = ["game", "playerA", "playerB", "time", "day", "location"];
+  const headers = ["tournament", "gameType", "playerA_email", "playerB_email", "location", "startAt", "endAt"];
   const sample = [{
-    game: "Chess", playerA: "Sandeep Singh Sachdeva",
-    playerB: "Rishi Sharma",
-    time: "1:30 PM - 2:00 PM", day: "Today", location: "Sky Deck - Tower A",
+    tournament: "Spring Chess Cup", gameType: "Chess",
+    playerA_email: "g.siva@unicommerce.com", playerB_email: "a.roy@snapdeal.com",
+    location: "Sky Deck - Tower A", startAt: "2026-09-25 13:30",
+    endAt: "", // optional — leave blank if the match has no fixed end time
   }];
   const ws = XLSX.utils.json_to_sheet(sample, { header: headers });
   const wb = XLSX.utils.book_new();
@@ -1078,8 +1800,14 @@ app.get("/api/admin/matches/template", (req, res) => {
   res.send(buf);
 });
 
-// Upload matches in bulk. Best-effort: valid rows imported, bad rows skipped
-// with a per-row error report. Games/players auto-created by name.
+// Bulk upload. Each row is a match under a tournament between two users given
+// by email. For every row we, in order:
+//   1. create the users (pre-verified, no OTP) from their emails if missing,
+//   2. register both to the tournament (auto-creating the tournament if needed),
+//   3. create the match under that tournament.
+// Best-effort: valid rows applied, bad rows skipped with a per-row reason.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "No file uploaded. Attach an .xlsx file as 'file'." });
   let rows;
@@ -1093,73 +1821,115 @@ app.post("/api/admin/matches/bulk", requireAdmin, upload.single("file"), h(async
   if (!rows.length) return res.status(400).json({ error: "The sheet has no data rows." });
 
   const result = await mutateDB(async (db) => {
+    if (!db.tournaments) db.tournaments = [];
+    if (!db.registrations) db.registrations = [];
 
-  // Case-insensitive lookup maps for auto-create-by-name.
-  const gameByName = {};
-  db.games.forEach((g) => (gameByName[g.name.trim().toLowerCase()] = g));
-  const playerByName = {};
-  db.players.forEach((p) => (playerByName[p.name.trim().toLowerCase()] = p));
+    const tByName = {};
+    db.tournaments.forEach((t) => (tByName[t.name.trim().toLowerCase()] = t));
 
-  function ensureGame(name) {
-    const key = name.trim().toLowerCase();
-    if (gameByName[key]) return gameByName[key];
-    const g = { id: id(), name: name.trim(), emoji: "🎮", description: "", ts: Date.now() };
-    db.games.push(g);
-    gameByName[key] = g;
-    return g;
-  }
-  function ensurePlayer(name) {
-    const key = name.trim().toLowerCase();
-    if (playerByName[key]) return playerByName[key];
-    const p = { id: id(), name: name.trim(), org: "" };
-    db.players.push(p);
-    playerByName[key] = p;
-    return p;
-  }
-
-  const report = [];
-  let created = 0, gamesCreated = 0, playersCreated = 0;
-  const gamesBefore = db.games.length, playersBefore = db.players.length;
-
-  rows.forEach((row, i) => {
-    const rowNum = i + 2; // + header row, 1-indexed
-    const game = String(row.game || "").trim();
-    const a = String(row.playerA || "").trim();
-    const b = String(row.playerB || "").trim();
-    if (!game || !a || !b) {
-      report.push({ row: rowNum, ok: false, error: "Missing required game/playerA/playerB." });
-      return;
+    // Find or create a tournament by name (auto-created ones are open to all
+    // orgs with no registration window).
+    function ensureTournament(name, gameType) {
+      const key = name.trim().toLowerCase();
+      if (tByName[key]) {
+        if (gameType && !tByName[key].gameType) tByName[key].gameType = gameType.trim();
+        return tByName[key];
+      }
+      const t = {
+        id: id(), name: name.trim(), gameType: (gameType || "").trim(),
+        regStart: null, regEnd: null, status: "active", orgs: [], createdAt: Date.now(),
+      };
+      db.tournaments.push(t);
+      tByName[key] = t;
+      return t;
     }
-    if (a.toLowerCase() === b.toLowerCase()) {
-      report.push({ row: rowNum, ok: false, error: "Player A and B must be different." });
-      return;
+    function register(t, email) {
+      if (!db.registrations.some((r) => r.tournamentId === t.id && r.email === email)) {
+        db.registrations.push({ tournamentId: t.id, email, registeredAt: Date.now(), gamesWon: 0, position: null });
+        return true;
+      }
+      return false;
     }
-    const g = ensureGame(game);
-    const pa = ensurePlayer(a);
-    const pb = ensurePlayer(b);
-    db.matches.push({
-      id: id(), gameId: g.id, playerAId: pa.id, playerBId: pb.id,
-      time: String(row.time || "").trim(), day: String(row.day || "Today").trim(),
-      location: String(row.location || "").trim(),
-      status: "upcoming", result: null, winnerId: null,
-      startAt: null, endAt: null,
+
+    const report = [];
+    let matchesCreated = 0, usersCreated = 0, registrationsCreated = 0;
+    const tBefore = db.tournaments.length;
+    const usersBefore = (db.users || []).length;
+
+    rows.forEach((row, i) => {
+      const rowNum = i + 2; // + header row, 1-indexed
+      const tName = String(row.tournament || "").trim();
+      const aEmail = auth.normalizeEmail(row.playerA_email);
+      const bEmail = auth.normalizeEmail(row.playerB_email);
+      if (!tName || !aEmail || !bEmail) {
+        report.push({ row: rowNum, ok: false, error: "Missing tournament / playerA_email / playerB_email." });
+        return;
+      }
+      if (!EMAIL_RE.test(aEmail) || !EMAIL_RE.test(bEmail)) {
+        report.push({ row: rowNum, ok: false, error: "Invalid email address." });
+        return;
+      }
+      if (aEmail === bEmail) {
+        report.push({ row: rowNum, ok: false, error: "Player A and B must be different." });
+        return;
+      }
+      const startAt = parseWhen(row.startAt);
+      if (row.startAt && startAt == null) {
+        report.push({ row: rowNum, ok: false, error: `Unparseable startAt "${row.startAt}" (use YYYY-MM-DD HH:MM).` });
+        return;
+      }
+      const endAt = parseWhen(row.endAt);
+      if (row.endAt && endAt == null) {
+        report.push({ row: rowNum, ok: false, error: `Unparseable endAt "${row.endAt}".` });
+        return;
+      }
+
+      const t = ensureTournament(tName, row.gameType);
+      // Respect org scope on pre-existing, org-restricted tournaments.
+      if (Array.isArray(t.orgs) && t.orgs.length) {
+        const bad = [aEmail, bEmail].find((e) => !t.orgs.includes(auth.orgFromEmail(e)));
+        if (bad) {
+          report.push({ row: rowNum, ok: false, error: `${bad} is not in this tournament's allowed orgs (${t.orgs.join(", ")}).` });
+          return;
+        }
+      }
+
+      // 1) users (pre-verified) + wallet
+      [aEmail, bEmail].forEach((e) => { ensureUser(db, e); getBalance(db, e); });
+      // 2) register both
+      if (register(t, aEmail)) registrationsCreated++;
+      if (register(t, bEmail)) registrationsCreated++;
+      // 3) match under the tournament
+      const game = ensureGameForTournament(db, t);
+      const pa = ensurePlayerForUser(db, aEmail);
+      const pb = ensurePlayerForUser(db, bEmail);
+      db.matches.push({
+        id: id(), gameId: game.id, tournamentId: t.id,
+        playerAId: pa.id, playerBId: pb.id,
+        time: "", day: "Today", location: String(row.location || "").trim(),
+        status: "upcoming", result: null, winnerId: null,
+        startAt, endAt,
+      });
+      matchesCreated += 1;
+      report.push({ row: rowNum, ok: true, match: `${t.name}: ${displayName(db, aEmail)} vs ${displayName(db, bEmail)}` });
     });
-    created += 1;
-    report.push({ row: rowNum, ok: true, match: `${g.name}: ${pa.name} vs ${pb.name}` });
-  });
 
-  gamesCreated = db.games.length - gamesBefore;
-  playersCreated = db.players.length - playersBefore;
+    usersCreated = (db.users || []).length - usersBefore;
+    const tournamentsCreated = db.tournaments.length - tBefore;
 
-  if (created > 0) {
-    broadcast("matches", {});
-    broadcast("games", {});
-  }
-  return {
-    ok: true,
-    summary: { rows: rows.length, created, skipped: rows.length - created, gamesCreated, playersCreated },
-    report,
-  };
+    if (matchesCreated > 0) {
+      broadcast("matches", {});
+      broadcast("games", {});
+      broadcast("tournaments", {});
+    }
+    return {
+      ok: true,
+      summary: {
+        rows: rows.length, created: matchesCreated, skipped: rows.length - matchesCreated,
+        usersCreated, tournamentsCreated, registrationsCreated,
+      },
+      report,
+    };
   });
   res.json(result);
 }));
@@ -1326,11 +2096,14 @@ async function ensureColumns() {
 
 (async () => {
   try {
-    await ensureColumns();
+    await ensureSchema();          // create/alter tables & feature columns
+    await ensureColumns();         // add resultEmailedAt (+ startAt/endAt) on old DBs
+    await seedAllowedDomainsOnce();
+    await refreshAllowedDomains();
     await seedIfEmpty();
   } catch (e) {
-    console.error("[startup] seed/DB error:", e.message);
-    console.error("Ensure MySQL is running and schema.sql has been loaded.");
+    console.error("[startup] schema/seed error:", e.message);
+    console.error("Ensure MySQL is reachable and the DB user can CREATE/ALTER, or load schema.sql manually.");
   }
   auth.verifySmtp(); // log SMTP status at boot (helps diagnose missing OTPs)
   startKeepAlive();

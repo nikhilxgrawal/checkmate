@@ -58,6 +58,10 @@ function dropCoins(count = 24) {
 var CURRENT_GAME_ID = null; // set on the per-game page
 function api(path, opts = {}) {
   return fetch(path, {
+    // Never serve API responses from the browser cache — otherwise admin
+    // actions (status/result changes) appear to need a second click or a
+    // refresh because a stale cached GET is returned.
+    cache: "no-store",
     headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
     ...opts,
   }).then(async (r) => {
@@ -132,14 +136,41 @@ async function validateSession() {
 }
 
 // ---------- Realtime (SSE) ----------
+// A persistent EventSource holds one of the browser's ~6 per-host HTTP/1.1
+// connections open. With several tabs open on localhost that budget gets
+// exhausted and page navigation/API calls stall for seconds. To avoid that we
+// only keep the stream open while THIS tab is visible, and drop it when the tab
+// is hidden or the page is being left.
 let _es = null;
-function connectRealtime(handlers) {
-  if (_es) _es.close();
+let _esHandlers = null;
+
+function openRealtime() {
+  if (!_esHandlers) return;
+  if (_es) { try { _es.close(); } catch (e) { /* ignore */ } }
   _es = new EventSource("/api/events");
-  Object.entries(handlers).forEach(([event, fn]) => {
+  Object.entries(_esHandlers).forEach(([event, fn]) => {
     _es.addEventListener(event, fn);
   });
   _es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+
+function closeRealtime() {
+  if (_es) { try { _es.close(); } catch (e) { /* ignore */ } _es = null; }
+}
+
+function connectRealtime(handlers) {
+  _esHandlers = handlers;
+  if (!document.hidden) openRealtime();
+  if (!window.__sseVisWired) {
+    window.__sseVisWired = true;
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) closeRealtime();
+      else openRealtime();
+    });
+    // Release the connection promptly when navigating away so the next page
+    // isn't stuck waiting for a free socket.
+    window.addEventListener("pagehide", closeRealtime);
+  }
 }
 
 // ---------- Email verification (OTP) ----------
@@ -167,17 +198,59 @@ function renderVerifyBar() {
   // Legacy fallback (pages without the header widget)
   if (!bar) return;
   if (s.token) {
-    bar.innerHTML = `<span class="verify-ok">✓ Verified as <strong>${esc(s.name || s.email)}</strong></span>
-      <button class="btn small ghost" onclick="signOutVoter()">Sign out</button>`;
+    // Verified identity now lives in the top nav; keep the bar out of the way.
+    bar.innerHTML = "";
+    bar.style.display = "none";
   } else {
+    bar.style.display = "";
     bar.innerHTML = `<span style="color:var(--muted)">Verify your Snapdeal email to predict &amp; post.</span>
       <button class="btn small" onclick="openVerify()">Verify Email</button>`;
   }
 }
 
+// ---- Top-nav user area (name -> profile, balance, sign out) ----
+let NAV_BALANCE = null;
+
+function renderNavUser() {
+  const el = document.getElementById("navUser");
+  if (!el) return;
+  const s = getSession();
+  if (s.token) {
+    el.innerHTML = `
+      <span class="nav-balance" id="navBalance" title="Your balance">💰 ₹${NAV_BALANCE == null ? "…" : NAV_BALANCE}</span>
+      <a class="nav-name profile-link" onclick="openProfile('${esc(s.email)}')" title="View your profile">${esc(s.name || s.email)}</a>
+      <button class="btn small ghost" onclick="signOutVoter()">Sign out</button>`;
+    refreshNavBalance();
+  } else {
+    el.innerHTML = `<button class="btn small" onclick="openVerify()">Verify</button>`;
+  }
+}
+
+async function refreshNavBalance() {
+  if (!isVerified()) { NAV_BALANCE = null; return; }
+  try {
+    const r = await api("/api/wallet", {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    NAV_BALANCE = r.balance;
+  } catch { /* ignore */ }
+  const b = document.getElementById("navBalance");
+  if (b) b.textContent = `💰 ₹${NAV_BALANCE == null ? "…" : NAV_BALANCE}`;
+}
+
 function openVerify() {
   const m = document.getElementById("verifyModal");
   if (m) { m.style.display = "flex"; showEmailStep(); }
+  // Fill the hint with the allowed orgs from central config (no hardcoding).
+  getAllowedOrgs().then((orgs) => {
+    const sub = m && m.querySelector(".modal-sub");
+    if (sub) {
+      sub.innerHTML = orgs.length
+        ? `Only <strong>${orgs.map((o) => esc(o.name)).join(", ")}</strong> employees can register, predict &amp; post.`
+        : "Verify your work email to register, predict &amp; post.";
+    }
+  }).catch(() => {});
 }
 function closeVerify() {
   const m = document.getElementById("verifyModal");
@@ -500,8 +573,7 @@ function matchCardHTML(m) {
   <div class="match-card ${isLive ? "is-live" : ""} ${isOver ? "is-over" : ""}">
     <div class="match-meta">
       ${statusBadge}
-      ${m.time ? `<span class="chip">⏱ ${esc(m.time)}</span>` : ""}
-      ${m.day ? `<span class="chip ghost">${esc(m.day)}</span>` : ""}
+      ${(() => { const w = fmtMatchTime(m); return w ? `<span class="chip">⏱ ${esc(w)}</span>` : ""; })()}
       ${m.location ? `<span class="chip ghost">📍 ${esc(m.location)}</span>` : ""}
       ${resultBadge}
     </div>
@@ -646,7 +718,7 @@ async function renderLeaderboards(gameId) {
           const sub = `${p.wins} win${p.wins === 1 ? "" : "s"}` +
             (p.draws ? ` · ${p.draws} draw${p.draws === 1 ? "" : "s"}` : "");
           const pts = Number.isInteger(p.points) ? p.points : p.points.toFixed(1);
-          return boardRow(i, p.name, sub, pts, "win", "pt" + (p.points === 1 ? "" : "s"));
+          return boardRow(i, p.name, sub, pts, "win", "pt" + (p.points === 1 ? "" : "s"), p.email);
         }).join("")
       : '<div class="empty">No match results yet. Winners appear once matches are decided.</div>';
 
@@ -656,7 +728,7 @@ async function renderLeaderboards(gameId) {
       ? bettors.map((p, i) => {
           const sub = `₹${p.balance} balance · staked ₹${p.staked}, won ₹${p.won}`;
           const net = (p.net > 0 ? "+₹" : p.net < 0 ? "-₹" : "₹") + Math.abs(p.net);
-          return boardRow(i, p.name, sub, net, p.net >= 0 ? "win" : "", "net");
+          return boardRow(i, p.name, sub, net, p.net >= 0 ? "win" : "", "net", p.email);
         }).join("")
       : '<div class="empty">No settled bids yet. Winnings show once matches have results.</div>';
 
@@ -665,7 +737,7 @@ async function renderLeaderboards(gameId) {
     if (pEl) {
       const players = (backed.players || []);
       let html = players.length
-        ? players.map((p, i) => boardRow(i, p.name, p.org, p.staked, "", "₹ backed")).join("")
+        ? players.map((p, i) => boardRow(i, p.name, p.org, p.staked, "", "₹ backed", p.email)).join("")
         : "";
       if (backed.drawStake) {
         html += boardRow(players.length, "🤝 Draw", "points on a draw", backed.drawStake, "", "₹ backed");
@@ -681,13 +753,16 @@ async function renderLeaderboards(gameId) {
   }
 }
 
-function boardRow(i, name, sub, score, scoreCls, unit) {
+function boardRow(i, name, sub, score, scoreCls, unit, email) {
   const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : "#" + (i + 1);
+  const nameHtml = email
+    ? `<a class="profile-link" onclick="openProfile('${esc(email)}')">${esc(name)}</a>`
+    : esc(name);
   return `
     <div class="board-row top-${i + 1}">
       <div class="rank">${medal}</div>
       <div class="who">
-        <div class="n">${esc(name)}</div>
+        <div class="n">${nameHtml}</div>
         <div class="o">${esc(sub || "")}</div>
       </div>
       <div class="score ${scoreCls}">${score} <span style="font-size:12px;color:var(--muted);font-weight:600">${unit}</span></div>
@@ -1163,10 +1238,14 @@ function showPanel() {
   document.getElementById("panel").style.display = "block";
   loadAdminData();
   loadModQueue();
+  loadTournamentsAdmin();
+  loadAllowedOrgsAdmin();
+  loadCashUsers();
   connectRealtime({
     moderation: () => loadModQueue(),
     matches: () => loadAdminData(),
     games: () => loadAdminData(),
+    tournaments: () => loadTournamentsAdmin(),
     predictions: () => {},
     bets: () => {},
   });
@@ -1228,10 +1307,11 @@ async function rejectPost(postId) {
 async function loadAdminData() {
   const filterSel = document.getElementById("matchGameFilter");
   const filterGameId = filterSel ? filterSel.value : "";
-  const [games, players, matches] = await Promise.all([
+  const [games, players, matches, tournaments] = await Promise.all([
     api("/api/games"),
     api("/api/players"),
     api("/api/matches" + (filterGameId ? `?gameId=${encodeURIComponent(filterGameId)}` : "")),
+    api("/api/tournaments").catch(() => []),
   ]);
   const gameNameById = {};
   games.forEach((g) => (gameNameById[g.id] = `${g.emoji || "🎮"} ${g.name}`));
@@ -1262,22 +1342,27 @@ async function loadAdminData() {
     filterSel.value = cur;
   }
 
-  // Players list
-  document.getElementById("playersList").innerHTML = players.length
-    ? players.map((p) => `
-        <div class="list-item">
-          <div><strong>${esc(p.name)}</strong> <span style="color:var(--muted)">· ${esc(p.org || "")}</span></div>
-          <button class="btn danger" onclick="delPlayer('${p.id}')">Remove</button>
-        </div>`).join("")
-    : '<div class="empty">No players yet.</div>';
+  // Optional roster list (card may be absent now that matches drive the roster).
+  const playersListEl = document.getElementById("playersList");
+  if (playersListEl) {
+    playersListEl.innerHTML = players.length
+      ? players.map((p) => `
+          <div class="list-item">
+            <div><strong>${esc(p.name)}</strong> <span style="color:var(--muted)">${p.email ? "· " + esc(p.email) : ""}</span></div>
+          </div>`).join("")
+      : '<div class="empty">No users on the roster yet.</div>';
+  }
 
-  const opts = players.map((p) => `<option value="${p.id}">${esc(p.name)} (${esc(p.org || "")})</option>`).join("");
-  const mA = document.getElementById("mA");
-  const mB = document.getElementById("mB");
-  mA.innerHTML = opts;
-  mB.innerHTML = opts;
-  // Default Player B to a different player than A so they don't collide.
-  if (players.length > 1) { mA.selectedIndex = 0; mB.selectedIndex = 1; }
+  // Tournament dropdown for Add Match; players come from its registrants.
+  const mTournament = document.getElementById("mTournament");
+  if (mTournament) {
+    const prev = mTournament.value;
+    mTournament.innerHTML = tournaments.length
+      ? tournaments.map((t) => `<option value="${t.id}">${esc(t.name)}${t.gameType ? " (" + esc(t.gameType) + ")" : ""}</option>`).join("")
+      : '<option value="">— create a tournament first —</option>';
+    if (prev && tournaments.some((t) => t.id === prev)) mTournament.value = prev;
+    await loadMatchParticipants();
+  }
 
   document.getElementById("adminMatches").innerHTML = matches.length
     ? matches.map((m) => {
@@ -1294,15 +1379,16 @@ async function loadAdminData() {
         return `
         <div class="admin-match">
           <div class="admin-match-head">
-            <div class="admin-match-info">
-              ${gameTag}
-              <div class="admin-match-title"><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong> vs <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
-              <div class="admin-match-meta">${esc(m.time || "")}${m.day ? " · " + esc(m.day) : ""}${resultText}</div>
-            </div>
-            ${statusControl}
+            ${gameTag}
+            <div class="admin-match-players"><strong>${esc(m.playerA ? m.playerA.name : "?")}</strong>
+              <span class="vs-sm">vs</span>
+              <strong>${esc(m.playerB ? m.playerB.name : "?")}</strong></div>
+            <div class="admin-match-sub">${esc(fmtMatchTime(m) || "No time set")}${resultText}</div>
           </div>
           <div class="admin-match-controls">
-            <select id="win_${m.id}">
+            ${statusControl}
+            <select id="win_${m.id}" class="admin-result-select">
+
               <option value="">— set result —</option>
               ${m.playerA ? `<option value="${m.playerA.id}" ${m.result === m.playerA.id ? "selected" : ""}>${esc(m.playerA.name)} wins</option>` : ""}
               ${m.playerB ? `<option value="${m.playerB.id}" ${m.result === m.playerB.id ? "selected" : ""}>${esc(m.playerB.name)} wins</option>` : ""}
@@ -1358,17 +1444,17 @@ async function setStatus(matchId, status) {
 }
 
 async function addPlayer() {
-  const name = document.getElementById("pName").value.trim();
+  const sel = document.getElementById("pUser");
+  const email = sel ? sel.value : "";
   const org = document.getElementById("pOrg").value.trim();
-  if (!name) return toast("Player name is required", "err");
+  if (!email) return toast("Select a user to add (they must have an account first)", "err");
   try {
     await api("/api/admin/players", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ name, org }),
+      body: JSON.stringify({ email, org }),
     });
-    document.getElementById("pName").value = "";
     document.getElementById("pOrg").value = "";
-    toast("Player added", "ok");
+    toast("User added to roster", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
 }
@@ -1382,21 +1468,49 @@ async function delPlayer(id) {
   } catch (e) { toast(e.message, "err"); }
 }
 
+// Populate the Player A/B dropdowns from the selected tournament's registrants.
+async function loadMatchParticipants() {
+  const sel = document.getElementById("mTournament");
+  const mA = document.getElementById("mA");
+  const mB = document.getElementById("mB");
+  if (!sel || !mA || !mB) return;
+  const tid = sel.value;
+  if (!tid) { mA.innerHTML = mB.innerHTML = '<option value="">—</option>'; return; }
+  try {
+    const t = await api(`/api/tournaments/${encodeURIComponent(tid)}`);
+    const parts = t.participants || [];
+    const opts = parts.length
+      ? parts.map((p) => `<option value="${esc(p.email)}">${esc(p.name)} (${esc(p.email)})</option>`).join("")
+      : '<option value="">— no one has registered yet —</option>';
+    mA.innerHTML = opts;
+    mB.innerHTML = opts;
+    if (parts.length > 1) mB.selectedIndex = 1;
+  } catch (e) {
+    mA.innerHTML = mB.innerHTML = `<option value="">${esc(e.message)}</option>`;
+  }
+}
+
 async function addMatch() {
-  const gameId = document.getElementById("mGame").value;
-  const playerAId = document.getElementById("mA").value;
-  const playerBId = document.getElementById("mB").value;
-  const time = document.getElementById("mTime").value.trim();
-  const day = document.getElementById("mDay").value.trim();
+  const tournamentId = document.getElementById("mTournament").value;
+  const playerAEmail = document.getElementById("mA").value;
+  const playerBEmail = document.getElementById("mB").value;
   const location = document.getElementById("mLoc").value.trim();
-  if (!gameId) return toast("Pick a game (add one first if none)", "err");
-  if (playerAId === playerBId) return toast("Pick two different players", "err");
+  const startAtEl = document.getElementById("mStartAt");
+  const endAtEl = document.getElementById("mEndAt");
+  const startAt = startAtEl && startAtEl.value ? startAtEl.value : null; // "YYYY-MM-DDTHH:MM"
+  const endAt = endAtEl && endAtEl.value ? endAtEl.value : null;
+  if (!tournamentId) return toast("Pick a tournament (create one first if none)", "err");
+  if (!playerAEmail || !playerBEmail) return toast("Pick two registered players", "err");
+  if (playerAEmail === playerBEmail) return toast("Pick two different players", "err");
+  if (startAt && endAt && endAt < startAt) return toast("Match end must be after the start", "err");
   try {
     await api("/api/admin/matches", {
       method: "POST", headers: adminHeaders(),
-      body: JSON.stringify({ gameId, playerAId, playerBId, time, day, location }),
+      body: JSON.stringify({ tournamentId, playerAEmail, playerBEmail, location, startAt, endAt }),
     });
-    document.getElementById("mTime").value = "";
+    if (startAtEl) startAtEl.value = "";
+    if (endAtEl) endAtEl.value = "";
+    document.getElementById("mLoc").value = "";
     toast("Match added", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
@@ -1427,8 +1541,8 @@ async function bulkUpload() {
        </div>`).join("");
     resultEl.innerHTML = `
       <div class="pending-notice" style="display:block">
-        Imported <strong>${s.created}</strong> of ${s.rows} rows · skipped ${s.skipped} ·
-        games created ${s.gamesCreated} · players created ${s.playersCreated}
+        Created <strong>${s.created}</strong> match${s.created === 1 ? "" : "es"} of ${s.rows} rows · skipped ${s.skipped} ·
+        users created ${s.usersCreated} · tournaments created ${s.tournamentsCreated} · registrations ${s.registrationsCreated}
       </div>
       ${rowsHtml}`;
     input.value = "";
@@ -1459,4 +1573,672 @@ async function setWinner(matchId) {
     toast(result ? (result === "draw" ? "Draw saved (½–½)" : "Result saved") : "Result cleared", "ok");
     loadAdminData();
   } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- User profiles ----------
+// Format an epoch-ms timestamp as a short local date + time (or "—").
+function fmtDateTime(ts) {
+  if (ts == null || ts === "") return "—";
+  const d = new Date(Number(ts));
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString([], {
+    day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+  });
+}
+
+// Smart match time display from startAt (epoch ms): "Today, 1:30 PM",
+// "Tomorrow, 4:00 PM" or "24 Sep, 1:30 PM". Appends end time if present.
+// Falls back to the legacy day/time strings when startAt isn't set.
+function fmtMatchTime(m) {
+  if (m.startAt) {
+    const d = new Date(Number(m.startAt));
+    if (!isNaN(d.getTime())) {
+      const now = new Date();
+      const sameDay = (a, b) =>
+        a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+      const tomorrow = new Date(now); tomorrow.setDate(now.getDate() + 1);
+      const t = (x) => x.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      let day;
+      if (sameDay(d, now)) day = "Today";
+      else if (sameDay(d, tomorrow)) day = "Tomorrow";
+      else day = d.toLocaleDateString([], { day: "numeric", month: "short" });
+      let s = `${day}, ${t(d)}`;
+      if (m.endAt) {
+        const e = new Date(Number(m.endAt));
+        if (!isNaN(e.getTime())) s += ` – ${t(e)}`;
+      }
+      return s;
+    }
+  }
+  const parts = [];
+  if (m.day) parts.push(m.day);
+  if (m.time) parts.push(m.time);
+  return parts.join(", ");
+}
+
+// Human label for a position (1 -> "🥇 1st", etc).
+function positionLabel(pos) {
+  if (pos == null) return "—";
+  const medal = pos === 1 ? "🥇 " : pos === 2 ? "🥈 " : pos === 3 ? "🥉 " : "";
+  const suffix = pos % 10 === 1 && pos % 100 !== 11 ? "st"
+    : pos % 10 === 2 && pos % 100 !== 12 ? "nd"
+    : pos % 10 === 3 && pos % 100 !== 13 ? "rd" : "th";
+  return `${medal}${pos}${suffix}`;
+}
+
+// Lazily create a reusable overlay used for both profile and tournament modals.
+function ensureOverlay() {
+  let ov = document.getElementById("overlayModal");
+  if (!ov) {
+    ov = document.createElement("div");
+    ov.id = "overlayModal";
+    ov.className = "modal";
+    ov.innerHTML = `<div class="modal-card overlay-card">
+        <button class="modal-close" onclick="closeOverlay()">×</button>
+        <div id="overlayBody"></div>
+      </div>`;
+    ov.addEventListener("click", (e) => { if (e.target === ov) closeOverlay(); });
+    document.body.appendChild(ov);
+  }
+  return ov;
+}
+function closeOverlay() {
+  const ov = document.getElementById("overlayModal");
+  if (ov) ov.style.display = "none";
+}
+
+async function openProfile(email) {
+  if (!email) return;
+  const ov = ensureOverlay();
+  const body = document.getElementById("overlayBody");
+  body.innerHTML = `<div class="empty">Loading profile…</div>`;
+  ov.style.display = "flex";
+  try {
+    const p = await api(`/api/users/${encodeURIComponent(email)}/profile`);
+    const isMe = getSession().email && getSession().email.toLowerCase() === email.toLowerCase();
+    const initial = esc((p.name || "?").charAt(0).toUpperCase());
+    // For your own profile, also show your wallet balance.
+    let myBalance = null;
+    if (isMe) {
+      try {
+        const w = await api("/api/wallet", {
+          method: "POST",
+          body: JSON.stringify({ sessionToken: getSession().token }),
+        });
+        myBalance = w.balance;
+      } catch { /* ignore */ }
+    }
+    const rows = (p.tournaments || []).length
+      ? p.tournaments.map((t) => `
+          <div class="ptourn-row">
+            <div class="ptourn-main">
+              <a class="profile-link ptourn-name" onclick="openTournament('${t.id}')">${esc(t.name)}</a>
+              ${t.gameType ? `<span class="chip ghost">${esc(t.gameType)}</span>` : ""}
+            </div>
+            <div class="ptourn-stats">
+              <span class="ptourn-pos">${positionLabel(t.position)}</span>
+              <span class="ptourn-won">${t.gamesWon} win${t.gamesWon === 1 ? "" : "s"}</span>
+            </div>
+          </div>`).join("")
+      : `<div class="empty">No tournaments yet.${isMe ? ' <a class="profile-link" onclick="closeOverlay();location.href=\'/tournaments.html\'">Browse tournaments →</a>' : ""}</div>`;
+    body.innerHTML = `
+      <div class="profile-head">
+        <div class="profile-avatar">${initial}</div>
+        <div>
+          <h3 class="profile-name">${esc(p.name)}${isMe ? ' <span class="anon-tag">you</span>' : ""}</h3>
+          <div class="profile-email">${esc(p.email)}</div>
+          ${p.orgName ? `<div class="profile-org">🏢 ${esc(p.orgName)}</div>` : ""}
+        </div>
+      </div>
+      <div class="profile-stats">
+        <div class="pstat"><div class="pstat-n">${p.tournamentsParticipated}</div><div class="pstat-l">Tournaments</div></div>
+        <div class="pstat"><div class="pstat-n">${p.gamesPlayed}</div><div class="pstat-l">Games played</div></div>
+        <div class="pstat"><div class="pstat-n">${p.gamesWon}</div><div class="pstat-l">Games won</div></div>
+        <div class="pstat"><div class="pstat-n">${p.podiums}</div><div class="pstat-l">Podiums</div></div>
+      </div>
+      ${isMe ? `<div class="profile-balance">💰 Balance <strong>₹${myBalance == null ? "…" : myBalance}</strong></div>` : ""}
+      <div class="section-subtitle">Tournaments participated</div>
+      <div class="ptourn-list">${rows}</div>
+      ${isMe ? `<div style="text-align:center;margin-top:16px"><a class="btn small" href="/tournaments.html">Find tournaments to join</a></div>` : ""}`;
+  } catch (e) {
+    body.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+// ---------- Tournaments ----------
+let MY_TOURNAMENTS = new Set(); // ids the current user is registered for
+
+function regStateBadge(t) {
+  if (t.registrationState === "open") return `<span class="chip live-chip">🟢 Registration open</span>`;
+  if (t.registrationState === "upcoming") return `<span class="chip ghost">🕒 Opens ${fmtDateTime(t.regStart)}</span>`;
+  return `<span class="chip over-chip">🔒 Registration closed</span>`;
+}
+
+function tournamentCardHTML(t) {
+  const registered = MY_TOURNAMENTS.has(t.id);
+  const eligible = eligibleForTournament(t);
+  const canAct = isVerified() && t.registrationState === "open";
+  let action = "";
+  if (registered) {
+    // Registered users can unregister until the window closes.
+    action = t.registrationState === "closed"
+      ? `<span class="chip win">✓ Registered</span>`
+      : `<span class="chip win" style="margin-right:8px">✓ Registered</span>
+         <button class="btn small ghost" onclick="unregisterTournament('${t.id}')">Unregister</button>`;
+  } else if (canAct && !eligible) {
+    action = `<span style="color:var(--muted);font-size:13px">Only ${esc(t.orgsLabel)}</span>`;
+  } else if (canAct) {
+    action = `<button class="btn small" onclick="registerTournament('${t.id}')">Register</button>`;
+  } else if (!isVerified() && t.registrationState === "open") {
+    action = `<button class="btn small" onclick="openVerify()">Verify to register</button>`;
+  } else if (t.registrationState === "upcoming") {
+    action = `<span style="color:var(--muted);font-size:13px">Opens ${fmtDateTime(t.regStart)}</span>`;
+  } else {
+    action = `<span style="color:var(--muted);font-size:13px">Registration closed</span>`;
+  }
+  const windowText = `${fmtDateTime(t.regStart)} → ${fmtDateTime(t.regEnd)}`;
+  return `
+    <div class="tournament-card ${t.registrationState === "open" ? "is-open" : ""}">
+      <div class="tc-head">
+        <div>
+          <div class="tc-name">${esc(t.name)}</div>
+          ${t.gameType ? `<span class="chip ghost">🎮 ${esc(t.gameType)}</span>` : ""}
+          <span class="chip ghost">👥 ${esc(t.orgsLabel)}</span>
+        </div>
+        ${regStateBadge(t)}
+      </div>
+      <div class="tc-meta">🗓 Registration: <strong>${windowText}</strong></div>
+      <div class="tc-foot">
+        <a class="profile-link" onclick="openTournament('${t.id}')">${t.participantCount} participant${t.participantCount === 1 ? "" : "s"} · view</a>
+        <div class="tc-action">${action}</div>
+      </div>
+    </div>`;
+}
+
+// Client-side org helpers (mirror the server's derivation) for eligibility UI.
+function clientOrgFromEmail(email) {
+  const domain = String(email || "").split("@")[1] || "";
+  return (domain.split(".")[0] || "").toLowerCase();
+}
+function eligibleForTournament(t) {
+  if (!t.orgs || !t.orgs.length) return true; // open to all
+  return t.orgs.includes(clientOrgFromEmail(getSession().email));
+}
+
+async function renderTournaments() {
+  const el = document.getElementById("tournaments");
+  if (!el) return;
+  renderVerifyBar();
+  try {
+    const [list, mine] = await Promise.all([
+      api("/api/tournaments"),
+      isVerified()
+        ? api("/api/tournaments/mine", {
+            method: "POST",
+            body: JSON.stringify({ sessionToken: getSession().token }),
+          }).catch(() => ({ ids: [] }))
+        : Promise.resolve({ ids: [] }),
+    ]);
+    MY_TOURNAMENTS = new Set(mine.ids || []);
+    el.innerHTML = list.length
+      ? list.map(tournamentCardHTML).join("")
+      : '<div class="empty">No tournaments yet. Check back soon.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function openTournament(id) {
+  const ov = ensureOverlay();
+  const body = document.getElementById("overlayBody");
+  body.innerHTML = `<div class="empty">Loading tournament…</div>`;
+  ov.style.display = "flex";
+  try {
+    const t = await api(`/api/tournaments/${encodeURIComponent(id)}`);
+    const parts = (t.participants || []).length
+      ? t.participants.map((p) => `
+          <div class="ptourn-row">
+            <div class="ptourn-main">
+              <span class="ptourn-pos" style="min-width:52px">${positionLabel(p.position)}</span>
+              <a class="profile-link" onclick="openProfile('${esc(p.email)}')">${esc(p.name)}</a>
+            </div>
+            <div class="ptourn-stats"><span class="ptourn-won">${p.gamesWon} win${p.gamesWon === 1 ? "" : "s"}</span></div>
+          </div>`).join("")
+      : `<div class="empty">No one has registered yet.</div>`;
+    const registered = MY_TOURNAMENTS.has(t.id);
+    const eligible = eligibleForTournament(t);
+    let action = "";
+    if (isVerified() && t.registrationState === "open" && !registered && !eligible) {
+      action = `<span style="color:var(--muted);font-size:13px">Only open to ${esc(t.orgsLabel)}</span>`;
+    } else if (isVerified() && t.registrationState === "open") {
+      action = registered
+        ? `<button class="btn small ghost" onclick="unregisterTournament('${t.id}', true)">Unregister</button>`
+        : `<button class="btn small" onclick="registerTournament('${t.id}', true)">Register</button>`;
+    }
+    body.innerHTML = `
+      <div class="profile-head">
+        <div class="profile-avatar">🏆</div>
+        <div>
+          <h3 class="profile-name">${esc(t.name)}</h3>
+          <div class="profile-email">${t.gameType ? "🎮 " + esc(t.gameType) + " · " : ""}${t.participantCount} registered</div>
+        </div>
+      </div>
+      <div class="tc-meta" style="margin:4px 0 14px">
+        ${regStateBadge(t)}
+        <span class="chip ghost" style="margin-left:6px">👥 ${esc(t.orgsLabel)}</span>
+        <div style="margin-top:6px;color:var(--muted);font-size:13px">🗓 ${fmtDateTime(t.regStart)} → ${fmtDateTime(t.regEnd)}</div>
+      </div>
+      ${action ? `<div style="text-align:center;margin-bottom:14px">${action}</div>` : ""}
+      <div class="section-subtitle">Participants</div>
+      <div class="ptourn-list">${parts}</div>`;
+  } catch (e) {
+    body.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function registerTournament(id, fromModal) {
+  if (!isVerified()) { openVerify(); return; }
+  try {
+    await api(`/api/tournaments/${id}/register`, {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    toast("Registered — good luck! 🎉", "ok");
+    MY_TOURNAMENTS.add(id);
+    if (document.getElementById("tournaments")) renderTournaments();
+    if (fromModal) openTournament(id);
+  } catch (e) {
+    if (/verify your email/i.test(e.message)) { clearSession(); openVerify(); }
+    toast(e.message, "err");
+    if (document.getElementById("tournaments")) renderTournaments();
+  }
+}
+
+async function unregisterTournament(id, fromModal) {
+  if (!isVerified()) { openVerify(); return; }
+  if (!confirm("Unregister from this tournament?")) return;
+  try {
+    await api(`/api/tournaments/${id}/unregister`, {
+      method: "POST",
+      body: JSON.stringify({ sessionToken: getSession().token }),
+    });
+    toast("You've unregistered.", "ok");
+    MY_TOURNAMENTS.delete(id);
+    if (document.getElementById("tournaments")) renderTournaments();
+    if (fromModal) openTournament(id);
+  } catch (e) {
+    toast(e.message, "err");
+    if (document.getElementById("tournaments")) renderTournaments();
+  }
+}
+
+function initTournaments() {
+  renderVerifyBar();
+  renderTournaments();
+  validateSession().then((ok) => { if (!ok) { renderVerifyBar(); renderTournaments(); } });
+  connectRealtime({
+    tournaments: () => renderTournaments(),
+  });
+}
+
+// ---------- Admin: tournaments ----------
+// Convert epoch ms -> "YYYY-MM-DDTHH:MM" in local time for datetime-local inputs.
+function toLocalInput(ts) {
+  if (ts == null || ts === "") return "";
+  const d = new Date(Number(ts));
+  if (isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function addTournament() {
+  const name = document.getElementById("tName").value.trim();
+  const gameType = document.getElementById("tGameType").value.trim();
+  const regStart = document.getElementById("tRegStart").value || null;
+  const regEnd = document.getElementById("tRegEnd").value || null;
+  const orgs = collectOrgs("tOrgs");
+  if (!name) return toast("Tournament name is required", "err");
+  try {
+    await api("/api/admin/tournaments", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ name, gameType, regStart, regEnd, orgs }),
+    });
+    document.getElementById("tName").value = "";
+    document.getElementById("tGameType").value = "";
+    document.getElementById("tRegStart").value = "";
+    document.getElementById("tRegEnd").value = "";
+    renderOrgPicker("tOrgs", []);
+    toast("Tournament created", "ok");
+    loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---- Admin: add cash to a user's wallet ----
+async function loadCashUsers() {
+  const sel = document.getElementById("cashUser");
+  const listEl = document.getElementById("cashList");
+  if (!sel) return;
+  try {
+    const users = await api("/api/admin/wallets", { headers: adminHeaders() });
+    sel.innerHTML = users.length
+      ? users.map((u) => `<option value="${esc(u.email)}">${esc(u.name)} (${esc(u.email)}) — ₹${u.balance}</option>`).join("")
+      : '<option value="">— no users yet —</option>';
+    if (listEl) {
+      listEl.innerHTML = users.length
+        ? users.map((u) => `
+            <div class="admin-tournament">
+              <div class="admin-t-head">
+                <div class="admin-t-title">
+                  <strong>${esc(u.name)}</strong>
+                  ${u.org ? `<span class="chip ghost">🏢 ${esc(u.org)}</span>` : ""}
+                  <span style="color:var(--muted);font-size:12px">${esc(u.email)}</span>
+                </div>
+                <div class="admin-t-actions"><span class="chip win">₹${u.balance}</span></div>
+              </div>
+            </div>`).join("")
+        : '<div class="empty">No users yet.</div>';
+    }
+  } catch (e) {
+    if (listEl) listEl.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function addCash() {
+  const email = document.getElementById("cashUser").value;
+  const amount = parseInt(document.getElementById("cashAmount").value, 10);
+  if (!email) return toast("Select a user", "err");
+  if (!Number.isFinite(amount) || amount === 0) return toast("Enter a non-zero whole amount", "err");
+  try {
+    const r = await api("/api/admin/wallet/credit", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ email, amount }),
+    });
+    toast(`${amount > 0 ? "Added" : "Deducted"} ₹${Math.abs(amount)} ${amount > 0 ? "to" : "from"} ${r.name}. New balance ₹${r.balance}`, "ok");
+    document.getElementById("cashAmount").value = "";
+    loadCashUsers();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---- Admin: allowed orgs (email domains) ----
+async function loadAllowedOrgsAdmin() {
+  const el = document.getElementById("orgsAdminList");
+  if (!el) return;
+  try {
+    const orgs = await api("/api/admin/orgs", { headers: adminHeaders() });
+    el.innerHTML = orgs.length
+      ? orgs.map((o) => `
+          <div class="admin-tournament">
+            <div class="admin-t-head">
+              <div class="admin-t-title">
+                <strong>${esc(o.name)}</strong>
+                <span class="chip ghost">✉️ ${esc(o.domain)}</span>
+              </div>
+              <div class="admin-t-actions">
+                <button class="btn danger" onclick="removeAllowedOrg('${esc(o.domain)}')">Remove</button>
+              </div>
+            </div>
+          </div>`).join("")
+      : '<div class="empty">No domains configured — anyone with any email can register.</div>';
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function addAllowedOrg() {
+  const input = document.getElementById("orgDomain");
+  const domain = (input.value || "").trim().toLowerCase();
+  if (!domain) return toast("Enter an email domain (e.g. acme.com)", "err");
+  try {
+    await api("/api/admin/orgs", {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ domain }),
+    });
+    input.value = "";
+    ALLOWED_ORGS_CACHE = null; // org picker + verify hint refetch
+    toast("Org added", "ok");
+    loadAllowedOrgsAdmin();
+    renderOrgPicker("tOrgs", []); // refresh the create-form options
+    loadTournamentsAdmin();       // refresh per-row org pickers
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function removeAllowedOrg(domain) {
+  if (!confirm(`Remove ${domain}? New registrations from this domain will be blocked. Existing users stay.`)) return;
+  try {
+    await api(`/api/admin/orgs/${encodeURIComponent(domain)}`, {
+      method: "DELETE", headers: adminHeaders(),
+    });
+    ALLOWED_ORGS_CACHE = null;
+    toast("Org removed", "ok");
+    loadAllowedOrgsAdmin();
+    renderOrgPicker("tOrgs", []);
+    loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---- Org picker (allowed orgs from /api/config) ----
+let ALLOWED_ORGS_CACHE = null;
+async function getAllowedOrgs() {
+  if (ALLOWED_ORGS_CACHE) return ALLOWED_ORGS_CACHE;
+  try { const c = await api("/api/config"); ALLOWED_ORGS_CACHE = c.allowedOrgs || []; }
+  catch { ALLOWED_ORGS_CACHE = []; }
+  return ALLOWED_ORGS_CACHE;
+}
+async function renderOrgPicker(containerId, selected) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  const orgs = await getAllowedOrgs();
+  const sel = new Set((selected || []).map((s) => String(s).toLowerCase()));
+  if (!orgs.length) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:13px">No org restriction configured — open to everyone.</span>';
+    return;
+  }
+  el.innerHTML =
+    `<label class="org-opt"><input type="checkbox" value="__all" ${sel.size === 0 ? "checked" : ""} onchange="onOrgAllToggle(this)"> All orgs</label>` +
+    orgs.map((o) => `<label class="org-opt"><input type="checkbox" class="org-box" value="${esc(o.id)}" ${sel.has(o.id) ? "checked" : ""} onchange="onOrgBoxToggle(this)"> ${esc(o.name)}</label>`).join("");
+}
+function onOrgAllToggle(cb) {
+  const box = cb.closest(".org-picker");
+  if (cb.checked) box.querySelectorAll(".org-box").forEach((b) => (b.checked = false));
+}
+function onOrgBoxToggle(cb) {
+  const box = cb.closest(".org-picker");
+  const all = box.querySelector('input[value="__all"]');
+  const any = [...box.querySelectorAll(".org-box")].some((b) => b.checked);
+  if (all) all.checked = !any;
+}
+function collectOrgs(containerId) {
+  const el = document.getElementById(containerId);
+  if (!el) return [];
+  const all = el.querySelector('input[value="__all"]');
+  if (all && all.checked) return [];
+  return [...el.querySelectorAll(".org-box")].filter((b) => b.checked).map((b) => b.value);
+}
+
+async function loadTournamentsAdmin() {
+  const el = document.getElementById("tournamentsAdminList");
+  if (!el) return;
+  // Render the create-form org picker once.
+  const createPicker = document.getElementById("tOrgs");
+  if (createPicker && !createPicker.dataset.ready) {
+    createPicker.dataset.ready = "1";
+    renderOrgPicker("tOrgs", []);
+  }
+  try {
+    const list = await api("/api/tournaments");
+    el.innerHTML = list.length
+      ? list.map((t) => {
+          const stateChip = t.registrationState === "open"
+            ? '<span class="chip live-chip">🟢 Open</span>'
+            : t.registrationState === "upcoming"
+            ? '<span class="chip ghost">🕒 Upcoming</span>'
+            : '<span class="chip over-chip">🔒 Closed</span>';
+          return `
+          <div class="admin-tournament">
+            <div class="admin-t-head">
+              <div class="admin-t-title">
+                <strong>${esc(t.name)}</strong>
+                ${t.gameType ? `<span class="chip ghost">🎮 ${esc(t.gameType)}</span>` : ""}
+                ${stateChip}
+                <span class="chip ghost">👥 ${esc(t.orgsLabel)}</span>
+                <span style="color:var(--muted);font-size:12px">${t.participantCount} registered</span>
+              </div>
+              <div class="admin-t-actions">
+                <button class="btn small ghost" onclick="toggleTournamentEdit('${t.id}')">Edit</button>
+                <button class="btn small ghost" onclick="toggleResults('${t.id}')">Results</button>
+                <button class="btn danger" onclick="delTournament('${t.id}')">Delete</button>
+              </div>
+            </div>
+            <div id="tedit_${t.id}" class="t-edit" style="display:none">
+              <div class="row">
+                <div><label>Name</label><input id="tn_${t.id}" value="${esc(t.name)}" /></div>
+                <div><label>Game Name</label><input id="tg_${t.id}" value="${esc(t.gameType)}" /></div>
+              </div>
+              <div class="row">
+                <div><label>Registration opens</label><input id="ts_${t.id}" type="datetime-local" value="${toLocalInput(t.regStart)}" /></div>
+                <div><label>Registration closes</label><input id="te_${t.id}" type="datetime-local" value="${toLocalInput(t.regEnd)}" /></div>
+              </div>
+              <label>Open to (orgs)</label>
+              <div id="torgs_${t.id}" class="org-picker"></div>
+              <button class="btn small" onclick="saveTournament('${t.id}')">Save changes</button>
+            </div>
+            <div id="results_${t.id}" class="results-panel" style="display:none"></div>
+          </div>`;
+        }).join("")
+      : '<div class="empty">No tournaments yet. Create one above.</div>';
+    // Populate each row's org picker with its current scope.
+    for (const t of list) renderOrgPicker(`torgs_${t.id}`, t.orgs || []);
+  } catch (e) {
+    el.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function saveTournament(id) {
+  const name = document.getElementById("tn_" + id).value.trim();
+  const gameType = document.getElementById("tg_" + id).value.trim();
+  const regStart = document.getElementById("ts_" + id).value || "";
+  const regEnd = document.getElementById("te_" + id).value || "";
+  const orgs = collectOrgs("torgs_" + id);
+  try {
+    await api(`/api/admin/tournaments/${id}`, {
+      method: "PUT", headers: adminHeaders(),
+      body: JSON.stringify({ name, gameType, regStart, regEnd, orgs }),
+    });
+    toast("Tournament updated", "ok");
+    loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+async function delTournament(id) {
+  if (!confirm("Delete this tournament? All its registrations will be removed.")) return;
+  try {
+    await api(`/api/admin/tournaments/${id}`, { method: "DELETE", headers: adminHeaders() });
+    toast("Tournament deleted", "ok");
+    loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+function toggleTournamentEdit(id) {
+  const el = document.getElementById("tedit_" + id);
+  if (el) el.style.display = el.style.display === "none" ? "flex" : "none";
+}
+
+async function toggleResults(id) {
+  const panel = document.getElementById("results_" + id);
+  if (!panel) return;
+  if (panel.style.display !== "none") { panel.style.display = "none"; return; }
+  panel.style.display = "block";
+  panel.innerHTML = '<div style="color:var(--muted)">Loading participants…</div>';
+  try {
+    const t = await api(`/api/tournaments/${encodeURIComponent(id)}`);
+    if (!t.participants.length) {
+      panel.innerHTML = '<div class="empty">No participants have registered yet.</div>';
+      return;
+    }
+    panel.innerHTML = `
+      <div class="results-head">Enter games won and final position for each participant, then save.</div>
+      ${t.participants.map((p) => `
+        <div class="result-row">
+          <div class="result-name">${esc(p.name)}<div class="result-email">${esc(p.email)}</div></div>
+          <div class="result-fields">
+            <label>Games won <input type="number" min="0" step="1" id="rw_${id}_${esc(p.email)}" value="${p.gamesWon || 0}" /></label>
+            <label>Position <input type="number" min="1" step="1" id="rp_${id}_${esc(p.email)}" value="${p.position != null ? p.position : ""}" placeholder="—" /></label>
+          </div>
+        </div>`).join("")}
+      <button class="btn small" onclick="saveResults('${id}')" style="margin-top:10px">Save results</button>`;
+    panel._emails = t.participants.map((p) => p.email);
+  } catch (e) {
+    panel.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+async function saveResults(id) {
+  const panel = document.getElementById("results_" + id);
+  const emails = (panel && panel._emails) || [];
+  const results = emails.map((email) => {
+    const w = document.getElementById(`rw_${id}_${email}`);
+    const p = document.getElementById(`rp_${id}_${email}`);
+    return {
+      email,
+      gamesWon: w ? w.value : undefined,
+      position: p ? (p.value === "" ? null : p.value) : undefined,
+    };
+  });
+  try {
+    const r = await api(`/api/admin/tournaments/${id}/results`, {
+      method: "POST", headers: adminHeaders(),
+      body: JSON.stringify({ results }),
+    });
+    toast(`Results saved for ${r.updated} participant${r.updated === 1 ? "" : "s"}`, "ok");
+    loadTournamentsAdmin();
+  } catch (e) { toast(e.message, "err"); }
+}
+
+// ---------- Profiles directory page ----------
+let ALL_PROFILES = [];
+
+function initProfiles() {
+  renderVerifyBar();
+  renderProfilesDirectory();
+  validateSession().then((ok) => { if (!ok) renderVerifyBar(); });
+  connectRealtime({
+    tournaments: () => renderProfilesDirectory(),
+    matches: () => renderProfilesDirectory(),
+    winner: () => renderProfilesDirectory(),
+  });
+}
+
+async function renderProfilesDirectory() {
+  const grid = document.getElementById("profilesGrid");
+  if (!grid) return;
+  try {
+    ALL_PROFILES = await api("/api/users");
+    renderProfilesGrid(ALL_PROFILES);
+  } catch (e) {
+    grid.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  }
+}
+
+function renderProfilesGrid(list) {
+  const grid = document.getElementById("profilesGrid");
+  if (!grid) return;
+  grid.innerHTML = list.length
+    ? list.map((u) => `
+        <div class="profile-card" onclick="openProfile('${esc(u.email)}')">
+          <div class="profile-avatar sm">${esc((u.name || "?").charAt(0).toUpperCase())}</div>
+          <div class="pc-info">
+            <div class="pc-name">${esc(u.name)}${u.orgName ? ` <span class="pc-org">${esc(u.orgName)}</span>` : ""}</div>
+            <div class="pc-sub">${u.tournamentsParticipated} tournament${u.tournamentsParticipated === 1 ? "" : "s"} · ${u.gamesWon} win${u.gamesWon === 1 ? "" : "s"} · ${u.gamesPlayed} played</div>
+          </div>
+          <div class="pc-arrow">›</div>
+        </div>`).join("")
+    : '<div class="empty">No players yet. Once people verify their email they show up here.</div>';
+}
+
+function filterProfiles() {
+  const q = (document.getElementById("profileSearch").value || "").toLowerCase();
+  const filtered = ALL_PROFILES.filter(
+    (u) => u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q)
+  );
+  renderProfilesGrid(filtered);
 }

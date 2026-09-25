@@ -6,3 +6,7 @@ nohup.out
 .env
 .idea/
 .env.docker
+
+# Local screenshots / scratch (never deploy these)
+*.heic
+*.HEIC
