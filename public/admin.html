@@ -16,7 +16,7 @@
       } catch (e) {}
     })();
   </script>
-  <link rel="stylesheet" href="/style.css?v=31" />
+  <link rel="stylesheet" href="/style.css?v=40" />
 </head>
 <body>
   <header class="topbar">
@@ -27,8 +27,11 @@
       <nav class="nav">
         <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
         <a href="/">Games</a>
+        <a href="/tournaments.html">Tournaments</a>
+        <a href="/profiles.html">Profiles</a>
         <a href="/community.html">Community</a>
         <a href="/admin.html" class="active">Admin</a>
+        <span id="navUser" class="nav-user"></span>
       </nav>
       <div id="accountWidget" class="account-widget"></div>
     </div>
@@ -45,40 +48,66 @@
 
     <!-- Panel -->
     <div id="panel" style="display:none">
-      <!-- Manage Games -->
-      <div style="text-align:center"><span class="section-title">🎮 Manage Games</span></div>
+      <!-- Allowed Orgs -->
+      <div style="text-align:center"><span class="section-title">🏢 Allowed Orgs</span></div>
       <div class="card">
-        <div class="row">
-          <div><label>Game Name</label><input id="gName" placeholder="e.g. Carrom" /></div>
-          <div><label>Emoji / Icon</label><input id="gEmoji" placeholder="e.g. 🔴" maxlength="4" /></div>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+          Only people with an email at these domains can register and take part. The org name is derived from the domain
+          (e.g. <strong>unicommerce.com → Unicommerce</strong>). Removing all domains opens the platform to any email.
+        </p>
+        <label>Email domain</label>
+        <div class="inline-add">
+          <input id="orgDomain" placeholder="e.g. acme.com" onkeydown="if(event.key==='Enter')addAllowedOrg()" />
+          <button class="btn" onclick="addAllowedOrg()">Add Org</button>
         </div>
-        <label>Description</label>
-        <input id="gDesc" placeholder="Short description" />
-        <button class="btn" onclick="addGame()">Add Game</button>
-        <div id="gamesList" style="margin-top:18px"></div>
+        <div id="orgsAdminList" style="margin-top:16px"></div>
       </div>
 
-      <div style="text-align:center"><span class="section-title">Add Player</span></div>
+      <!-- Add Cash -->
+      <div style="text-align:center"><span class="section-title">💰 Add Cash</span></div>
+      <div class="card">
+        <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
+          Credit points to a user's wallet. Use a negative amount to deduct (balance can't go below 0).
+        </p>
+        <div class="row">
+          <div><label>User</label><select id="cashUser"></select></div>
+          <div><label>Amount (₹)</label><input id="cashAmount" type="number" step="1" placeholder="e.g. 5000" onkeydown="if(event.key==='Enter')addCash()" /></div>
+        </div>
+        <button class="btn" onclick="addCash()">Add Cash</button>
+        <div id="cashList" style="margin-top:16px"></div>
+      </div>
+
+      <!-- Manage Tournaments (games) -->
+      <div style="text-align:center"><span class="section-title">🏆 Manage Tournaments</span></div>
       <div class="card">
         <div class="row">
-          <div><label>Player Name</label><input id="pName" placeholder="e.g. Sandeep Singh Sachdeva" /></div>
-          <div><label>Organisation</label><input id="pOrg" placeholder="e.g. Snapdeal" /></div>
+          <div><label>Tournament Name</label><input id="tName" placeholder="e.g. Spring Chess Cup" /></div>
+          <div><label>Game Name</label><input id="tGameType" placeholder="e.g. Chess, Carrom, FIFA…" /></div>
         </div>
-        <button class="btn" onclick="addPlayer()">Add Player</button>
-        <div id="playersList" style="margin-top:18px"></div>
+        <div class="row">
+          <div><label>Registration opens</label><input id="tRegStart" type="datetime-local" /></div>
+          <div><label>Registration closes</label><input id="tRegEnd" type="datetime-local" /></div>
+        </div>
+        <label>Open to (orgs)</label>
+        <div id="tOrgs" class="org-picker"></div>
+        <p style="color:var(--muted);font-size:12px;margin:6px 0 0">Leave all boxes unchecked (or tick "All orgs") to open the tournament to everyone. Otherwise only the selected orgs can register.</p>
+        <p style="color:var(--muted);font-size:12px;margin:6px 0 0">Users can register/unregister only between the two times above. Leave blank for no bound.</p>
+        <button class="btn" onclick="addTournament()">Create Tournament</button>
+        <div id="tournamentsAdminList" style="margin-top:18px"></div>
       </div>
 
       <div style="text-align:center"><span class="section-title">Add Match</span></div>
       <div class="card">
-        <label>Game</label>
-        <select id="mGame"></select>
+        <p style="color:var(--muted);font-size:13px;margin-bottom:10px">Every match is played under a tournament. Only users <strong>registered to the chosen tournament</strong> can be picked — they're added to the roster automatically.</p>
+        <label>Tournament</label>
+        <select id="mTournament" onchange="loadMatchParticipants()"></select>
         <div class="row" style="margin-top:10px">
           <div><label>Player A</label><select id="mA"></select></div>
           <div><label>Player B</label><select id="mB"></select></div>
         </div>
         <div class="row">
-          <div><label>Time Slot (display)</label><input id="mTime" placeholder="e.g. 1:30 PM - 2:00 PM" /></div>
-          <div><label>Day (display)</label><input id="mDay" placeholder="Today" value="Today" /></div>
+          <div><label>Match start</label><input id="mStartAt" type="datetime-local" /></div>
+          <div><label>Match end (optional)</label><input id="mEndAt" type="datetime-local" /></div>
         </div>
         <div class="row">
           <div><label>Location</label><input id="mLoc" placeholder="e.g. Sky Deck - Tower A" /></div>
@@ -89,8 +118,10 @@
       <div style="text-align:center"><span class="section-title">⬆️ Bulk Upload Matches (.xlsx)</span></div>
       <div class="card">
         <p style="color:var(--muted);font-size:13px;margin-bottom:10px">
-          Upload an Excel file — one match per row. Games and players are auto-created by name.
-          Best-effort: valid rows import, invalid rows are skipped and reported.
+          One match per row, players given by <strong>email</strong>. For each row we create the users
+          (pre-verified, no OTP needed), register both to the tournament (auto-created if new), then create the match.
+          Columns: <code>tournament, gameType, playerA_email, playerB_email, location, startAt, endAt</code>.
+          Best-effort: valid rows apply, invalid rows are skipped and reported.
           <a href="/api/admin/matches/template" class="back-link" style="color:var(--red)">⬇ Download template</a>
         </p>
         <input id="bulkFile" type="file" accept=".xlsx,.xls" />
@@ -118,7 +149,7 @@
   </main>
 
   <div id="toast" class="toast"></div>
-  <script src="/app.js?v=32"></script>
+  <script src="/app.js?v=40"></script>
   <script>initAdmin();</script>
 </body>
 </html>

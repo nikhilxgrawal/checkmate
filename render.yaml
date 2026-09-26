@@ -6,5 +6,40 @@ services:
     buildCommand: npm install
     startCommand: npm start
     envVars:
-      - key: ADMIN_KEY
+      # --- Secrets / connection (set values in the host dashboard) ---
+      - key: ADMIN_KEY            # strong admin panel key
         sync: false
+      - key: SESSION_SECRET       # long, STABLE random (openssl rand -hex 32)
+        sync: false
+      - key: DB_HOST
+        sync: false
+      - key: DB_PORT
+        value: "3306"
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        value: checkmate
+      - key: DB_SSL              # "true" for managed MySQL that requires TLS
+        value: "true"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # --- Behaviour / config ---
+      - key: ALLOWED_EMAIL_DOMAINS  # seeds allowed orgs on first boot
+        sync: false
+      - key: PUBLIC_URL             # https URL of the deployed service
+        sync: false
+      - key: STARTING_BALANCE
+        value: "10000"
+      - key: MAX_BID
+        value: "0"
+      # NOTE: do NOT set OTP_DEV_ECHO in production (it exposes login codes).

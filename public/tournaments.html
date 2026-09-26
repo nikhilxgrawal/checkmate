@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Community — SnapGames</title>
+  <title>Tournaments — SnapGames</title>
   <script>
     // Set the theme BEFORE first paint to prevent a flash of the wrong theme.
     (function () {
@@ -22,14 +22,14 @@
   <header class="topbar">
     <div class="container topbar-inner">
       <div class="brand"><a href="/">SNAP<span class="mate">GAMES</span></a>
-        <span class="sub">COMMUNITY</span>
+        <span class="sub">TOURNAMENTS</span>
       </div>
       <nav class="nav">
         <button id="themeToggle" class="theme-toggle" title="Toggle theme" onclick="toggleTheme()">☀️</button>
         <a href="/">Games</a>
-        <a href="/tournaments.html">Tournaments</a>
+        <a href="/tournaments.html" class="active">Tournaments</a>
         <a href="/profiles.html">Profiles</a>
-        <a href="/community.html" class="active">Community</a>
+        <a href="/community.html">Community</a>
         <a href="/admin.html">Admin</a>
         <span id="navUser" class="nav-user"></span>
       </nav>
@@ -37,31 +37,28 @@
     </div>
   </header>
 
-  <main class="container" style="max-width:640px">
+  <main class="container" style="max-width:820px">
     <div id="verifyBar" class="verify-bar"></div>
     <div style="text-align:center">
-      <span class="section-title">💬 Community</span>
+      <span class="section-title">🏆 Tournaments</span>
     </div>
-    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">Cheer for your favourites, share predictions, and talk chess. Posts are reviewed by an admin before appearing.</p>
-
-    <div id="pendingNotice" class="pending-notice" style="display:none"></div>
-    <div id="postForm"></div>
-    <div id="posts" class="posts"></div>
+    <p style="text-align:center;color:var(--muted);margin-bottom:16px;font-size:14px">
+      Register for a tournament while its registration window is open. Track your results and position in your profile.
+    </p>
+    <div id="tournaments" class="tournaments-grid"></div>
   </main>
 
   <!-- Email verification modal -->
   <div id="verifyModal" class="modal">
     <div class="modal-card">
       <button class="modal-close" onclick="closeVerify()">×</button>
-      <h3>Verify to Post</h3>
-      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can post. Your name will be shown.</p>
-
+      <h3>Verify your email</h3>
+      <p class="modal-sub">Only <strong>@snapdeal.com</strong> emails can register &amp; take part.</p>
       <div id="stepEmail">
         <label>Snapdeal Email</label>
         <input id="vEmail" type="email" placeholder="you@snapdeal.com" />
         <button id="reqOtpBtn" class="btn" onclick="requestOtp()">Send Code</button>
       </div>
-
       <div id="stepCode" style="display:none">
         <p class="modal-sub">Enter the 6-digit code sent to <strong id="codeSentTo"></strong></p>
         <label>Verification Code</label>
@@ -72,10 +69,10 @@
     </div>
   </div>
 
-  <div class="footer">SnapGames · Acevector · Community</div>
+  <div class="footer">SnapGames · Acevector · Tournaments</div>
   <div id="toast" class="toast"></div>
 
   <script src="/app.js?v=40"></script>
-  <script>initCommunity();</script>
+  <script>initTournaments();</script>
 </body>
 </html>
