@@ -635,7 +635,7 @@ input[type="file"]::file-selector-button:hover { background: var(--red-dark); }
   opacity: 0;
   pointer-events: none;
   transition: all 0.25s;
-  z-index: 50;
+  z-index: 10000; /* above the verify/bid/overlay modals (z 100) so errors stay visible */
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .toast.ok { border-left-color: #3fbf6f; }

@@ -1063,6 +1063,11 @@ function initGame() {
     chat: (e) => { if (isTabVisible("chat")) renderChat(true); },
     games: () => renderGameHeader(),
   });
+  // Fallback poll: refresh chat every 7s while the Chat tab is open, so new
+  // messages appear without a manual refresh even if the SSE stream drops.
+  setInterval(() => {
+    if (!document.hidden && isTabVisible("chat")) renderChat(true);
+  }, 7000);
 }
 
 function isTabVisible(name) {
@@ -1195,6 +1200,8 @@ function initChat() {
   connectRealtime({
     chat: () => renderChat(true),
   });
+  // Fallback poll so new messages appear without a manual refresh.
+  setInterval(() => { if (!document.hidden) renderChat(true); }, 7000);
 }
 
 // ---------- Admin ----------
